@@ -150,6 +150,7 @@ SET (H5FD_SRCS
     ${HDF5_SRC_DIR}/H5FDmpiposix.c
     ${HDF5_SRC_DIR}/H5FDmulti.c
     ${HDF5_SRC_DIR}/H5FDsec2.c
+    ${HDF5_SRC_DIR}/H5FDsid.c
     ${HDF5_SRC_DIR}/H5FDspace.c
     ${HDF5_SRC_DIR}/H5FDstdio.c
 )
@@ -166,6 +167,7 @@ SET (H5FD_HDRS
     ${HDF5_SRC_DIR}/H5FDpkg.h
     ${HDF5_SRC_DIR}/H5FDpublic.h
     ${HDF5_SRC_DIR}/H5FDsec2.h
+    ${HDF5_SRC_DIR}/H5FDsid.h
     ${HDF5_SRC_DIR}/H5FDstdio.h
 )
 IDE_GENERATED_PROPERTIES ("H5FD" "${H5FD_HDRS}" "${H5FD_SRCS}" )

@@ -16,8 +16,8 @@
 /*
  * This file contains public declarations for the HDF5 module.
  */
-#ifndef _H5public_H
-#define _H5public_H
+#ifndef _H5public_H_
+#define _H5public_H_
 
 /* Include files for public use... */
 /*
