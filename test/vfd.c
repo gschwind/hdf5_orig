@@ -54,6 +54,7 @@ const char *FILENAME[] = {
     "stdio_file",        /*7*/
     "windows_file",      /*8*/
     "new_multi_file_v16",/*9*/
+    "sid_file",          /*10*/
     NULL
 };
 
@@ -140,6 +141,82 @@ error:
     return -1;
 }
 
+/*-------------------------------------------------------------------------
+ * Function:    test_sid
+ *
+ * Purpose:     Tests the file handle interface for SEC2 driver
+ *
+ * Return:      Success:        0
+ *              Failure:        -1
+ *
+ * Programmer:  Raymond Lu
+ *              Tuesday, Sept 24, 2002
+ *
+ *-------------------------------------------------------------------------
+ */
+static herr_t
+test_sid(void)
+{
+  hid_t        file            = -1;
+  hid_t        fapl            = -1;
+  hid_t        access_fapl     = -1;
+    char         filename[1024];
+    int          *fhandle        = NULL;
+    hsize_t      file_size       = 0;
+
+    TESTING("SID file driver");
+
+    /* Set property list and file name for SEC2 driver. */
+    fapl = h5_fileaccess();
+    if(H5Pset_fapl_sid(fapl) < 0)
+        TEST_ERROR;
+    h5_fixname(FILENAME[0], fapl, filename, sizeof filename);
+
+    if((file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl)) < 0)
+        TEST_ERROR;
+
+    /* Retrieve the access property list... */
+    if((access_fapl = H5Fget_access_plist(file)) < 0)
+        TEST_ERROR;
+
+    /* Check that the driver is correct */
+    if(H5FD_SEC2 != H5Pget_driver(access_fapl))
+        TEST_ERROR;
+
+    /* ...and close the property list */
+    if(H5Pclose(access_fapl) < 0)
+        TEST_ERROR;
+
+    /* Check file handle API */
+    if(H5Fget_vfd_handle(file, H5P_DEFAULT, (void **)&fhandle) < 0)
+        TEST_ERROR;
+    if(*fhandle < 0)
+        TEST_ERROR;
+
+    /* Check file size API */
+    if(H5Fget_filesize(file, &file_size) < 0)
+        TEST_ERROR;
+
+    /* There is no guarantee the size of metadata in file is constant.
+     * Just try to check if it's reasonable.  It's 2KB right now.
+     */
+    if(file_size < 1 * KB || file_size > 4 * KB)
+        TEST_ERROR;
+
+    if(H5Fclose(file) < 0)
+        TEST_ERROR;
+
+    h5_cleanup(FILENAME, fapl);
+    PASSED();
+    return 0;
+
+error:
+    H5E_BEGIN_TRY {
+        H5Pclose(fapl);
+        H5Fclose(file);
+    } H5E_END_TRY;
+    return -1;
+}
 
 
 /*-------------------------------------------------------------------------
@@ -1593,6 +1670,7 @@ main(void)
     nerrors += test_log() < 0            ? 1 : 0;
     nerrors += test_stdio() < 0          ? 1 : 0;
     nerrors += test_windows() < 0        ? 1 : 0;
+    nerrors += test_sid() < 0        ? 1 : 0;
 
     if(nerrors) {
   printf("***** %d Virtual File Driver TEST%s FAILED! *****\n",
