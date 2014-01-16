@@ -33,7 +33,7 @@
 #include "H5Eprivate.h"     /* Error handling           */
 #include "H5Fprivate.h"     /* File access              */
 #include "H5FDprivate.h"    /* File drivers             */
-#include "H5FDsec2.h"       /* Sec2 file driver         */
+#include "H5FDsid.h"        /* sid file driver         */
 #include "H5FLprivate.h"    /* Free Lists               */
 #include "H5Iprivate.h"     /* IDs                      */
 #include "H5MMprivate.h"    /* Memory management        */
@@ -139,12 +139,18 @@ typedef struct H5FD_sid_log_msg_write_t {
 	uint64_t voffset;
 } H5FD_sid_log_msg_write_t;
 
+typedef struct H5FD_sid_log_msg_truncate_t {
+	uint64_t type;
+	uint64_t size;
+	uint64_t truncate_to;
+} H5FD_sid_log_msg_truncate_t;
 
 enum H5FD_sid_mesage_type_t {
 	H5FD_SID_MSG_WRITE = 1,					/* write operation */
 	H5FD_SID_MSG_WRITE_IN_FILE = 2,			/* write in file, not used yet, but it is posible to write new data directly in file without currputing the hdf5, when this data are wrote after the end of file when it was opened */
 	H5FD_SID_MSG_WRITE_IN_FILE_DONE = 3,    /* not used yet see previous comment */
-	H5FD_SID_MSG_CLOSE_FILE = 3				/* mark file close to validate log */
+	H5FD_SID_MSG_CLOSE_FILE = 3,			/* mark file close to validate log */
+	H5FD_SID_MSG_TRUNCATE = 4				/* truncate masage */
 };
 
 enum H5FD_sid_source_id_t {
@@ -289,6 +295,8 @@ H5FD_sid_replay_log(H5FD_sid_t * file) {
 		} else if (hdr.type == H5FD_SID_MSG_CLOSE_FILE) {
 			end = 1;
 			valid_log = 1;
+		} else if (hdr.type == H5FD_SID_MSG_TRUNCATE) {
+			HDfseek(log_fd, hdr.size, SEEK_CUR);
 		} else {
 			end = 1;
 		}
@@ -299,6 +307,8 @@ H5FD_sid_replay_log(H5FD_sid_t * file) {
 
 		unsigned char * buf = malloc(sizeof(H5FD_sid_log_msg_write_t) + max_write_size);
 		H5FD_sid_log_msg_write_t * whdr = (H5FD_sid_log_msg_write_t*)buf;
+		H5FD_sid_log_msg_truncate_t * thdr = (H5FD_sid_log_msg_write_t*)buf;
+
 		unsigned char * data = &buf[sizeof(H5FD_sid_log_msg_write_t)];
 
 
@@ -314,6 +324,10 @@ H5FD_sid_replay_log(H5FD_sid_t * file) {
 				HDwrite(fd, data, whdr->size);
 			} else if (hdr.type == H5FD_SID_MSG_CLOSE_FILE) {
 				end = 1;
+			} else if (hdr.type == H5FD_SID_MSG_TRUNCATE) {
+				HDfseek(log_fd, -sizeof(hdr), SEEK_CUR);
+				HDread(log_fd, buf, sizeof(H5FD_sid_log_msg_truncate_t) + hdr.size);
+				HDftruncate(fd, thdr->truncate_to);
 			} else {
 				/* must never happen */
 				end = 1;
@@ -367,6 +381,121 @@ static herr_t H5FD_sid_read(H5FD_t *_file, H5FD_mem_t type, hid_t fapl_id, haddr
 static herr_t H5FD_sid_write(H5FD_t *_file, H5FD_mem_t type, hid_t fapl_id, haddr_t addr,
             size_t size, const void *buf);
 static herr_t H5FD_sid_truncate(H5FD_t *_file, hid_t dxpl_id, hbool_t closing);
+
+static size_t H5FD_sid_virtual_write(H5FD_sid_t * file, void * buf, size_t size) {
+
+	/** write to log file **/
+	struct H5FD_sid_log_msg_write_t header;
+	header.size = size;
+	header.voffset = HDftell(file->fd);
+	header.type = H5FD_SID_MSG_WRITE;
+
+	/* write header in log */
+	size_t w = HDwrite(file->log_fd, &header, sizeof(header));
+
+	if(w < 0)
+		return w;
+
+	H5FD_sid_virtual_file_map_insert(file->map, header.voffset, HDftell(file->log_fd), size);
+
+	/* write data in file */
+	return HDwrite(file->log_fd, buf, size);
+
+}
+
+static size_t H5FD_sid_virtual_read(H5FD_sid_t * file, void * buf, size_t size) {
+
+	size_t osize;
+	/** read with log data **/
+	unsigned char * xbuf = buf;
+	uint64_t voffset = HDfteel(file->fd);
+	H5FD_sid_virtual_file_map_t * cur = H5FD_sid_virtual_file_map_find_node(file->map, voffset);
+
+	while(size > 0) {
+		if(cur->file_source == H5FD_SID_SRC_FILE) {
+			HDfseek(file->fd, voffset, SEEK_SET);
+			uint64_t read_size = 0;
+			if(voffset + size > voffset + cur->size) {
+				read_size = (voffset + cur->size) - (voffset + size) + 1;
+			} else {
+				read_size = (voffset + size) - (voffset + cur->size) + 1;
+			}
+			HDread(file->fd, xbuf, read_size);
+			xbuf += read_size;
+			size -= read_size;
+			voffset += size;
+
+		} else if (cur->file_source == H5FD_SID_SRC_LOG) {
+			HDfseek(file->log_fd, voffset - cur->voffset + cur->roffset, SEEK_SET);
+
+			uint64_t read_size = 0;
+			if(voffset + size > voffset + cur->size) {
+				read_size = (voffset + cur->size) - (voffset + size) + 1;
+			} else {
+				read_size = (voffset + size) - (voffset + cur->size) + 1;
+			}
+			HDread(file->fd, xbuf, read_size);
+			xbuf += read_size;
+			size -= read_size;
+			voffset += size;
+		}
+
+		cur = cur->next;
+	}
+
+	return osize - size;
+
+}
+
+static size_t H5FD_sid_virtual_truncate(H5FD_sid_t * file, size_t size) {
+
+	H5FD_sid_virtual_file_map_t * node = H5FD_sid_virtual_file_map_find_node(file->map, size);
+
+	if(node != NULL) {
+		H5FD_sid_virtual_file_map_split(file->map, size);
+		node = H5FD_sid_virtual_file_map_find_node(file->map, size);
+		node->prev->next = NULL;
+
+		while(node != NULL) {
+			H5FD_sid_virtual_file_map_t * tmp = node->next;
+			free(node);
+			node = tmp;
+		}
+
+	} else {
+		if(file->map == NULL) {
+			file->map = malloc(sizeof(H5FD_sid_virtual_file_map_t));
+			file->map->file_source = H5FD_SID_SRC_EMPTY;
+			file->map->voffset = 0;
+			file->map->roffset = 0;
+			file->map->next = NULL;
+			file->map->prev = NULL;
+			file->map->size = size;
+		} else {
+			node = file->map;
+			while(node->next != NULL) {
+				node = node->next;
+			}
+
+			node->next = malloc(sizeof(H5FD_sid_virtual_file_map_t));
+			node->next->file_source = H5FD_SID_SRC_EMPTY;
+			node->next->voffset = node->voffset + node->size;
+			node->next->roffset = node->voffset + node->size;
+			node->next->size = size - node->next->voffset;
+			node->next->next = NULL;
+			node->next->prev = NULL;
+		}
+	}
+
+
+	H5FD_sid_log_msg_truncate_t msg;
+	msg.type = H5FD_SID_MSG_TRUNCATE;
+	msg.truncate_to = size;
+	msg.size = 0;
+
+	return HDwrite(file->log_fd, &msg, sizeof(msg));
+
+}
 
 static const H5FD_class_t H5FD_sid_g = {
     "sid",                     /* name                 */
@@ -693,9 +822,24 @@ H5FD_sid_close(H5FD_t *_file)
     /* Sanity check */
     HDassert(file);
 
+    H5FD_sid_log_msg_header_t chdr;
+    chdr.size = 0;
+    chdr.type = H5FD_SID_MSG_CLOSE_FILE;
+
+    /** ensure log are closed and writed on disk **/
+    HDwrite(file->log_fd, &chdr, sizeof(H5FD_sid_log_msg_header_t));
+    fsync(file->log_fd);
+    close(file->log_fd);
+
+    /** replay log to write on file **/
+    H5FD_sid_replay_log(file);
+
     /* Close the underlying file */
     if(HDclose(file->fd) < 0)
         HSYS_GOTO_ERROR(H5E_IO, H5E_CANTCLOSEFILE, FAIL, "unable to close file")
+
+    /** remove temporary file **/
+    HDunlink(file->log_filename);
 
     /* Release the file info */
     file = H5FL_FREE(H5FD_sid_t, file);
@@ -970,47 +1114,7 @@ H5FD_sid_read(H5FD_t *_file, H5FD_mem_t UNUSED type, hid_t UNUSED dxpl_id,
             bytes_in = (h5_posix_io_t)size;
 
         do {
-
-        	/** read with log data **/
-        	unsigned char * xbuf = buf;
-        	uint64_t voffset = HDfteel(file->fd);
-        	uint64_t size = bytes_in;
-        	H5FD_sid_virtual_file_map_t * cur = H5FD_sid_virtual_file_map_find_node(file->map, voffset);
-
-        	while(byte_in > 0) {
-        		if(cur->file_source == H5FD_SID_SRC_FILE) {
-        			HDfseek(file->fd, voffset, SEEK_SET);
-        			if(voffset + size > voffset + cur->size) {
-        				uint64_t read_size = (voffset + cur->size) - (voffset + size) + 1
-        				HDread(file->fd, xbuf, read_size);
-        				xbuf += read_size;
-        				bytes_in -= read_size;
-        			} else {
-        				uint64_t read_size = (voffset + size) - (voffset + cur->size) + 1;
-        				HDread(file->fd, xbuf, read_size);
-        				xbuf += read_size;
-        				bytes_in -= read_size;
-        			}
-
-        		} else if (cur->file_source == H5FD_SID_SRC_LOG) {
-        			HDfseek(file->log_fd, voffset - cur->voffset + cur->roffset, SEEK_SET);
-        			if(voffset + size > voffset + cur->size) {
-        				uint64_t read_size = (voffset + cur->size) - (voffset + size) + 1
-        				HDread(file->fd, xbuf, read_size);
-        				xbuf += read_size;
-        				bytes_in -= read_size;
-        			} else {
-        				uint64_t read_size = (voffset + size) - (voffset + cur->size) + 1;
-        				HDread(file->fd, xbuf, read_size);
-        				xbuf += read_size;
-        				bytes_in -= read_size;
-        			}
-        		}
-
-        		cur = cur->next;
-        	}
-
-            bytes_read = HDread(file->fd, buf, bytes_in);
+            bytes_read = H5FD_sid_virtual_read(file, buf, bytes_in);
         } while(-1 == bytes_read && EINTR == errno);
         
         if(-1 == bytes_read) { /* error */
@@ -1101,26 +1205,13 @@ H5FD_sid_write(H5FD_t *_file, H5FD_mem_t UNUSED type, hid_t UNUSED dxpl_id,
         /* Trying to write more bytes than the return type can handle is
          * undefined behavior in POSIX.
          */
-        if(size > H5_POSIX_MAX_IO_BYTES - sizeof(struct H5FD_sid_log_msg_write_t))
-            bytes_in = H5_POSIX_MAX_IO_BYTES - sizeof(struct H5FD_sid_log_msg_write_t);
+        if(size > H5_POSIX_MAX_IO_BYTES)
+            bytes_in = H5_POSIX_MAX_IO_BYTES;
         else
             bytes_in = (h5_posix_io_t)size;
 
         do {
-
-        	/** write to log file **/
-        	struct H5FD_sid_log_msg_write_t header;
-        	header.size = bytes_in;
-        	header.voffset = HDftell(file->fd);
-        	header.type = H5FD_SID_MSG_WRITE;
-
-        	/* write header in log */
-        	HDwrite(file->log_fd, &header, sizeof(header));
-
-        	H5FD_sid_virtual_file_map_insert(file->map, header.voffset, HDftell(file->log_fd), bytes_in);
-
-        	/* write data in file */
-        	bytes_wrote = HDwrite(file->log_fd, buf, bytes_in);
+        	bytes_wrote = H5FD_sid_virtual_write(file, buf, bytes_in);
 
         } while(-1 == bytes_wrote && EINTR == errno);
         
@@ -1215,7 +1306,7 @@ H5FD_sid_truncate(H5FD_t *_file, hid_t UNUSED dxpl_id, hbool_t UNUSED closing)
         if(-1 == HDlseek(file->fd, (HDoff_t)0, SEEK_SET))
             HSYS_GOTO_ERROR(H5E_IO, H5E_SEEKERROR, FAIL, "unable to seek to proper position")
 #endif
-        if(-1 == HDftruncate(file->fd, (HDoff_t)file->eoa))
+        if(-1 == H5FD_sid_virtual_truncate(file, (HDoff_t)file->eoa))
             HSYS_GOTO_ERROR(H5E_IO, H5E_SEEKERROR, FAIL, "unable to extend file properly")
 #endif /* H5_HAVE_WIN32_API */
 

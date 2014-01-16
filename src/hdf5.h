@@ -46,6 +46,7 @@
 #include "H5FDmpi.h"            /* MPI-based file drivers		*/
 #include "H5FDmulti.h"		/* Usage-partitioned file family	*/
 #include "H5FDsec2.h"		/* POSIX unbuffered file I/O		*/
+#include "H5FDsid.h"		/* POSIX unbuffered file I/O		*/
 #include "H5FDstdio.h"		/* Standard C buffered I/O		*/
 #ifdef H5_HAVE_WINDOWS
 #include "H5FDwindows.h"        /* Windows buffered I/O     */

@@ -595,6 +595,8 @@
 ./src/H5FDpublic.h
 ./src/H5FDsec2.c
 ./src/H5FDsec2.h
+./src/H5FDsid.c
+./src/H5FDsid.h
 ./src/H5FDspace.c
 ./src/H5FDstdio.c
 ./src/H5FDstdio.h
