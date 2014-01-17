@@ -14,15 +14,29 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
- * Programmer:  Robb Matzke <matzke@llnl.gov>
- *              Thursday, July 29, 1999
+ * Warning: Currently in ALPHA, do not use on production. LOG FORMAT WILL CHANGE.
  *
- * Purpose: The POSIX unbuffered file driver using only the HDF5 public
- *          API and with a few optimizations: the lseek() call is made
- *          only when the current file position is unknown or needs to be
- *          changed based on previous I/O through this driver (don't mix
- *          I/O from this driver with I/O from other parts of the
- *          application to the same file).
+ * Programmer:  Benoit Gschwind <benoit.gschwind@mines-paristech.fr>
+ *              based on sec2 driver (2014) by Robb Matzke <matzke@llnl.gov>
+ *
+ * Purpose: The Safe and Inefficient Driver intend to implement journalized
+ *          file write to ensure data integrity. The driver do not write data in
+ *          file immediately but it write it into alternate file journal file all
+ *          update operation. When the file is close those operation are written on
+ *          real file then deleted. If the software that open HDF5 file crash at
+ *          any point of this process the file is restored to the previous state
+ *          (before we opened it) or to the current valid state (at the moment
+ *          of closing the file). By this way, HDF5 cannot be corrupted. The draw
+ *          back is temporary disk space consuming and twice slower write.
+ *
+ * GLOSAIRE :
+ *
+ *  journal file: the file used for storing operations
+ *
+ *  original file: the file that we open at open state
+ *
+ *  final file: the file at the close state
+ *
  */
 
 /* Interface initialization */
@@ -39,22 +53,34 @@
 #include "H5MMprivate.h"    /* Memory management        */
 #include "H5Pprivate.h"     /* Property lists           */
 
+
+/* enum to use in virtual file map to specify the location of data */
+typedef enum H5FD_sid_source_id_t {
+	H5FD_SID_SRC_EMPTY, /* data are not alocated */
+	H5FD_SID_SRC_FILE,  /* data are located in original file */
+	H5FD_SID_SRC_LOG    /* data are located in journal file */
+} H5FD_sid_source_id_t;
+
+
 /**
- * simple sorted list of file virtual file map
+ * simple sorted list of file virtual file map.
  *
- * The file is writen only after close function is called. Before close we have to map real data,
- * this linked list is for this purpose.
+ * This map allow to create a virtual continuous file that is stored several files. in this case
+ * in journal file and/or original file and/or empty area (area that is not already written).
+ *
+ * By usage this map cannot have node with size == 0.
  *
  */
-typedef struct H5FD_sid_virtual_file_map_t {
-	int64_t voffset;			/** offset in virtual file **/
-	int64_t roffset;			/** offset in the current real file **/
-	int64_t size;				/** size of this xxchunk **/
-	int64_t file_source;		/** file source, is it from log ? **/
-	struct H5FD_sid_virtual_file_map_t * next;
-	struct H5FD_sid_virtual_file_map_t * prev;
+typedef struct H5FD_sid_vfm_t {
+	int64_t voffset;			/* offset in virtual file */
+	int64_t roffset;			/* offset in the current real file */
+	int64_t size;				/* size of data */
+	int64_t file_source;		/* file source, is it from log ? */
+	struct H5FD_sid_vfm_t * next;
+	struct H5FD_sid_vfm_t * prev;
 } H5FD_sid_virtual_file_map_t;
 
+/* short name for the virtual_file_map */
 typedef H5FD_sid_virtual_file_map_t H5FD_sid_vfm_t;
 
 /* The driver identification number, initialized at runtime */
@@ -80,9 +106,10 @@ typedef struct H5FD_sid_t {
     H5FD_file_op_t  op;     /* last operation                   */
     char            filename[H5FD_MAX_FILENAME_LEN];    /* Copy of file name from open operation */
 
-    int             log_fd;
-    char            log_filename[H5FD_MAX_FILENAME_LEN];    /* Copy of file name from open operation */
-    H5FD_sid_virtual_file_map_t * map; /* store the map between the current file and log file */
+    int             log_fd; /* handle the journal file */
+    char            log_filename[H5FD_MAX_FILENAME_LEN]; /* Copy of file name from open operation */
+
+    H5FD_sid_vfm_t * map;   /* store the map between the current file and log file */
 
 #ifndef H5_HAVE_WIN32_API
     /* On most systems the combination of device and i-node number uniquely
@@ -129,38 +156,45 @@ typedef struct H5FD_sid_t {
 
 
 /**
- * define message header.
  *
- * message header are fixed length header, but content can change.
+ * Log file structure is kept as simple as possible. Thus it is not optimized in size.
  *
- * Only the first 128 bits are always type and size.
- *
- * size is always the size of message data (without header).
+ * The log file is compound by messages. Each message are contiguous and start at offset 0.
+ * A message always start with a fixed length message header followed by free message data.
+ * This header always start with 2 64 bits little-endian integers, the first one is the
+ * message type and the second one is the size of free message data. The rest of the header
+ * is depend on message type. See the following structure declaration to know the
+ * interpretation of remaining data.
  *
  **/
 
+/* any message struct, used to read any message header, this not a real message*/
 typedef struct H5FD_sid_log_msg_any_t {
 	int64_t type;
 	int64_t size;
 } H5FD_sid_log_msg_any_t;
 
+/* write message store write operation, data that must be written and there location of this data */
 typedef struct H5FD_sid_log_msg_write_t {
 	int64_t type;
 	int64_t size;
 	int64_t voffset;
 } H5FD_sid_log_msg_write_t;
 
+/* truncate message store truncate operation */
 typedef struct H5FD_sid_log_msg_truncate_t {
 	int64_t type;
 	int64_t size;
 	int64_t truncate_to;
 } H5FD_sid_log_msg_truncate_t;
 
+/* close operation store close operation */
 typedef struct H5FD_sid_log_msg_close_t {
 	int64_t type;
 	int64_t size;
 } H5FD_sid_log_msg_close_t;
 
+/* union of all messages type, this define the size of message header */
 typedef union H5FD_sid_log_msg_t {
 	int64_t type;
 	H5FD_sid_log_msg_any_t m_any;
@@ -170,6 +204,7 @@ typedef union H5FD_sid_log_msg_t {
 } H5FD_sid_log_msg_t;
 
 
+/* list of message type and forseen message type */
 typedef enum H5FD_sid_mesage_type_t {
 	H5FD_SID_MSG_NONE = 0,					/* NO USED */
 	H5FD_SID_MSG_WRITE,					/* write operation */
@@ -183,6 +218,7 @@ typedef enum H5FD_sid_mesage_type_t {
 	H5FD_SID_MSG_LAST
 } H5FD_sid_mesage_type_t;
 
+/* char for debuging purpose */
 static char const * const s_mesage_type[] = {
 		"H5FD_SID_MSG_NONE",
 		"H5FD_SID_MSG_WRITE",
@@ -194,11 +230,6 @@ static char const * const s_mesage_type[] = {
 };
 
 
-typedef enum H5FD_sid_source_id_t {
-	H5FD_SID_SRC_EMPTY,
-	H5FD_SID_SRC_FILE,
-	H5FD_SID_SRC_LOG
-} H5FD_sid_source_id_t;
 
 
 
@@ -439,7 +470,7 @@ H5FD_sid_vfm_insert(H5FD_sid_vfm_t * ths, int64_t voffset, int64_t roffset, int6
  *
  * Replay have 3 pass :
  *
- *  1. read replay file and check if it end with a close mesage.
+ *  1. read replay file and check if it end with a close message.
  *     if not, the replay is dropped, all update are lost.
  *
  *  2. rebuild the virtual file map, to map log file data into
@@ -486,6 +517,7 @@ H5FD_sid_replay_log(char const * filename, char const * log_filename) {
 	while(1) {
 		if(HDread(log_fd, &hdr, sizeof(hdr)) < sizeof(hdr)) {
 			printf("fail to read header\n");
+			/* invalid log */
 			break;
 		}
 
@@ -518,17 +550,12 @@ H5FD_sid_replay_log(char const * filename, char const * log_filename) {
 
 	if(valid_log == 1) {
 
-
-
-		/**
-		 * rebuild map data to optimize write.
-		 **/
-
 		/** go back to begin **/
 		HDlseek(log_fd, 0, SEEK_SET);
 
 		while(1) {
 			if(HDread(log_fd, &hdr, sizeof(hdr)) < sizeof(hdr)) {
+				/* should not fail ... */
 				return -1;
 			}
 
