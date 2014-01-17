@@ -170,7 +170,7 @@ test_sid(void)
     fapl = h5_fileaccess();
     if(H5Pset_fapl_sid(fapl) < 0)
         TEST_ERROR;
-    h5_fixname(FILENAME[0], fapl, filename, sizeof filename);
+    h5_fixname(FILENAME[10], fapl, filename, sizeof filename);
 
     if((file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl)) < 0)
         TEST_ERROR;
@@ -180,7 +180,7 @@ test_sid(void)
         TEST_ERROR;
 
     /* Check that the driver is correct */
-    if(H5FD_SEC2 != H5Pget_driver(access_fapl))
+    if(H5FD_SID != H5Pget_driver(access_fapl))
         TEST_ERROR;
 
     /* ...and close the property list */

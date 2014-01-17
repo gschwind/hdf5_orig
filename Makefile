@@ -252,10 +252,10 @@ BYTESEX = little-endian
 CC = gcc
 CCDEPMODE = depmode=gcc3
 CC_VERSION = /usr/bin/gcc
-CFLAGS = 
+CFLAGS = -g -Og
 CLEARFILEBUF = yes
 CODESTACK = no
-CONFIG_DATE = Thu Jan 16 22:54:23 CET 2014
+CONFIG_DATE = Thu Jan 16 23:00:21 CET 2014
 CONFIG_MODE = production
 CONFIG_USER = benoit.gschwind@tsunami
 CPP = gcc -E
@@ -263,7 +263,7 @@ CPPFLAGS =
 CXX = no
 CXXCPP = g++ -E
 CXXDEPMODE = depmode=gcc3
-CXXFLAGS = 
+CXXFLAGS = -g -Og
 CXX_VERSION = no
 CYGPATH_W = echo
 DEBUG_PKG = 
