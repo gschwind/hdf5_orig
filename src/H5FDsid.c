@@ -367,7 +367,6 @@ H5FD_sid_vfm_extract(H5FD_sid_vfm_t * ths, int64_t offset, int64_t size) {
 static void
 H5FD_sid_vfm_print(H5FD_sid_vfm_t * ths) {
 	H5FD_sid_vfm_t * cur = ths;
-	return;
 	printf("MAP BEGIN\n");
 	while(cur != NULL) {
 		char const * s = NULL;
@@ -805,10 +804,13 @@ H5FD_sid_virtual_read(H5FD_sid_t * file, void * buf, int64_t addr, size_t const 
 			if(HDlseek(file->fd, cur->voffset, SEEK_SET) < 0)
 				return -1;
 
-			printf("H5FD_sid_virtual_read(FILE,%ld,%ld)\n", cur->voffset, cur->size);
-			if((read_size = (int64_t)HDread(file->fd, xbuf, cur->size)) < 0)
-				return -1;
+			printf("H5FD_sid_virtual_read(FILE,%p,%ld,%ld)\n", xbuf, cur->voffset, cur->size);
 
+			do {
+				(read_size = (int64_t)HDread(file->fd, xbuf, cur->size));
+	        } while(-1 == read_size && EINTR == errno);
+
+			printf("Readed %ld %d\n", read_size, errno);
 			if(read_size < cur->size) {
 				return ret_value + read_size;
 			}
@@ -822,9 +824,12 @@ H5FD_sid_virtual_read(H5FD_sid_t * file, void * buf, int64_t addr, size_t const 
 			if(HDlseek(file->log_fd, cur->roffset, SEEK_SET) < 0)
 				return -1;
 
-			printf("H5FD_sid_virtual_read(LOG,%ld,%ld)\n", cur->roffset, cur->size);
-			if((read_size = (int64_t)HDread(file->log_fd, xbuf, cur->size)) < 0)
-				return -1;
+			printf("H5FD_sid_virtual_read(LOG,%p,%ld,%ld)\n", xbuf, cur->voffset, cur->size);
+			do {
+				(read_size = (int64_t)HDread(file->log_fd, xbuf, cur->size));
+	        } while(-1 == read_size && EINTR == errno);
+
+			printf("Readed %ld\n", read_size);
 
 			if(read_size < cur->size) {
 				return ret_value + read_size;
