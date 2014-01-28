@@ -57,8 +57,8 @@
 typedef struct H5FD_safe_log_header_t {
 	uint64_t magic_id; /* id used for checksum, header validation nad message validation */
 	uint64_t old_magic_id; /* if both header are valid, keep the previous number to validate the newer */
-	uint64_t log_begin_offset; /* offset in file of the first log message */
 	uint64_t file_map_offset; /* offset of valid filemap at start of log */
+	uint64_t file_map_fragment_count;
 	uint64_t check_sum; /* check sum of header */
 } H5FD_safe_log_header_t;
 
@@ -86,40 +86,48 @@ typedef struct H5FD_safe_alloc_list_t {
 }H5FD_safe_alloc_list_t;
 
 static void
-H5FD_safe_alloc_list_print(H5FD_safe_alloc_list_t * ths) {
+H5FD_safe_alloc_list_print(H5FD_safe_alloc_list_t * ths, char const * name) {
 	H5FD_safe_alloc_list_t * cur;
 
 	cur = ths;
 
-	printf("PRINT LIST %p\n", ths);
+	printf("%s: ", name);
 	while (cur != NULL) {
-		printf("node: offset=%ld, size=%ld\n", cur->offset, cur->size);
+		printf("[%ld, %ld] -> ", cur->offset, cur->size);
 		cur = cur->next;
 	}
-	printf("PRINT LIST END\n");
+	printf("NULL\n");
 
 }
 
 
 static H5FD_safe_alloc_list_t *
 H5FD_safe_alloc_list_cleanup(H5FD_safe_alloc_list_t * ths) {
-	H5FD_safe_alloc_list_t * cur = ths;
-	while(cur != NULL) {
-		H5FD_safe_alloc_list_t * cur2 = cur->next;
-		while(cur2 != NULL) {
-			if(cur->offset + cur->size >= cur2->offset) {
-				cur->size = cur2->offset + cur2->size - cur->offset;
+	//printf("H5FD_safe_alloc_list_cleanup(%p)\n", ths);
+	//H5FD_safe_alloc_list_print(ths, "anonymous");
+	H5FD_safe_alloc_list_t * i = ths;
+	while(i != NULL) {
+		H5FD_safe_alloc_list_t * j = i->next;
+		while(j != NULL) {
+			if(i->offset + i->size >= j->offset) {
+				i->size = j->offset + j->size - i->offset;
+				i->next = j->next;
+				free(j);
+				j = i->next;
+			} else {
+				j = j->next;
 			}
-			cur2 = cur2->next;
 		}
-		cur = cur->next;
+		i = i->next;
 	}
 	return ths;
 }
 
 static H5FD_safe_alloc_list_t *
 H5FD_safe_alloc_list_new_node(int64_t offset, int64_t size) {
-	H5FD_safe_alloc_list_t * res = (H5FD_safe_alloc_list_t *)malloc(sizeof(H5FD_safe_alloc_list_t));
+	H5FD_safe_alloc_list_t * res;
+	printf("H5FD_safe_alloc_list_new_node(%ld, %ld)\n", offset, size);
+	res = (H5FD_safe_alloc_list_t *)malloc(sizeof(H5FD_safe_alloc_list_t));
 	res->offset = offset;
 	res->size = size;
 	res->next = NULL;
@@ -129,21 +137,23 @@ H5FD_safe_alloc_list_new_node(int64_t offset, int64_t size) {
 static H5FD_safe_alloc_list_t *
 H5FD_safe_alloc_list_add(H5FD_safe_alloc_list_t * ths, H5FD_safe_alloc_list_t * node) {
 	H5FD_safe_alloc_list_t ** cur;
+	//printf("H5FD_safe_alloc_list_add(node = [%ld, %ld])\n", node->offset, node->size);
+	//H5FD_safe_alloc_list_print(ths, "Before anonymous");
 
-	if(ths == NULL) {
-		return node;
-	}
-
+	/* find node position */
 	cur = &ths;
-
 	while ((*cur) != NULL) {
 		if ((*cur)->offset >= node->offset) {
-			node->next = *cur;
-			*cur = node;
 			break;
 		}
 		cur = &((*cur)->next);
 	}
+
+	/* insert node */
+	node->next = *cur;
+	*cur = node;
+
+	//H5FD_safe_alloc_list_print(ths, "After anonymous");
 
 	return H5FD_safe_alloc_list_cleanup(ths);
 }
@@ -173,47 +183,22 @@ H5FD_safe_alloc_list_remove(H5FD_safe_alloc_list_t * ths, H5FD_safe_alloc_list_t
 static H5FD_safe_alloc_list_t *
 H5FD_safe_negative_mask(H5FD_safe_alloc_list_t * ths) {
 	H5FD_safe_alloc_list_t * res = NULL;
-	H5FD_safe_alloc_list_t ** p_res = &res;
-	H5FD_safe_alloc_list_t * cur = ths;
+	H5FD_safe_alloc_list_t * cur;
+	int64_t last_end = 0;
 
-	if(ths == NULL) {
-		H5FD_safe_alloc_list_t * x = (H5FD_safe_alloc_list_t *)malloc(sizeof(H5FD_safe_alloc_list_t));
-		x->offset = 0;
-		x->size = MAXADDR;
-		x->next = NULL;
-		return x;
-	}
-
-	if (ths->offset > 0) {
-		H5FD_safe_alloc_list_t * x = (H5FD_safe_alloc_list_t *) malloc(
-				sizeof(H5FD_safe_alloc_list_t));
-		x->offset = 0;
-		x->size = ths->offset;
-		x->next = NULL;
-		p_res = &(x->next);
-	}
-
+	cur = ths;
 	while(cur != NULL) {
-		if(cur->next != NULL) {
-			H5FD_safe_alloc_list_t * x = (H5FD_safe_alloc_list_t *) malloc(
-					sizeof(H5FD_safe_alloc_list_t));
-			x->offset = cur->offset + cur->size;
-			x->size = cur->next->offset - cur->offset + cur->size;
-			x->next = NULL;
-			*p_res = x;
-			p_res = &(x->next);
-		} else {
-			H5FD_safe_alloc_list_t * x = (H5FD_safe_alloc_list_t *) malloc(
-					sizeof(H5FD_safe_alloc_list_t));
-			x->offset = cur->offset + cur->size;
-			x->size = MAXADDR - cur->offset + cur->size;
-			x->next = NULL;
-			*p_res = x;
-			p_res = &(x->next);
+		if(cur->offset > last_end) {
+			H5FD_safe_alloc_list_t * x = H5FD_safe_alloc_list_new_node(last_end, cur->offset - last_end);
+			res = H5FD_safe_alloc_list_add(res, x);
 		}
-
+		last_end = cur->offset + cur->size;
 		cur = cur->next;
 	}
+
+	H5FD_safe_alloc_list_t * x = H5FD_safe_alloc_list_new_node(last_end, INT64_MAX - last_end);
+	res = H5FD_safe_alloc_list_add(res, x);
+	res = H5FD_safe_alloc_list_cleanup(res);
 
 	return res;
 }
@@ -261,7 +246,6 @@ typedef struct H5FD_safe_vfm_t {
 	int64_t voffset;			/* offset in virtual file */
 	int64_t roffset;			/* offset in the current real file */
 	int64_t size;				/* size of data */
-	int64_t file_source;		/* file source, is it from log ? */
 	struct H5FD_safe_vfm_t * next;
 	struct H5FD_safe_vfm_t * prev;
 } H5FD_safe_virtual_file_map_t;
@@ -292,18 +276,17 @@ typedef struct H5FD_safe_t {
     H5FD_file_op_t  op;     /* last operation                   */
     char            filename[H5FD_MAX_FILENAME_LEN];    /* Copy of file name from open operation */
 
-    int             log_fd; /* handle the journal file */
-    char            log_filename[H5FD_MAX_FILENAME_LEN]; /* Copy of file name from open operation */
+    uint64_t file_id; /* the file id (a random one generated at file creation */
 
-    int64_t file_id;
-    int64_t log_id;
+    H5FD_safe_vfm_t * map;   /* map the virtual address space with the real file space */
 
-    H5FD_safe_log_handler_t log_handler;
-    H5FD_safe_vfm_t * map;   /* store the map between the current file and log file */
+    /* manage file alloacation */
+    H5FD_safe_alloc_list_t * prot; /* protected area is are in file that cannot be used */
+    H5FD_safe_alloc_list_t * free; /* area that ca be used to write new data */
+    H5FD_safe_alloc_list_t * used; /* area that are used, this area can be freed to be reused later */
 
-    H5FD_safe_alloc_list_t * prot;
-    H5FD_safe_alloc_list_t * free;
-    H5FD_safe_alloc_list_t * used;
+    /* which log are currently protected (i.e. the old valid log) */
+    int selected_log;
 
 
 #ifndef H5_HAVE_WIN32_API
@@ -480,6 +463,9 @@ static char const * const s_mesage_type[] = {
 static H5FD_t *H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id,
             haddr_t maxaddr);
 static herr_t H5FD_safe_close(H5FD_t *_file);
+
+static int64_t H5FD_safe_alloc(H5FD_safe_t * file, int64_t size);
+
 static int H5FD_safe_cmp(const H5FD_t *_f1, const H5FD_t *_f2);
 static herr_t H5FD_safe_query(const H5FD_t *_f1, unsigned long *flags);
 static haddr_t H5FD_safe_get_eoa(const H5FD_t *_file, H5FD_mem_t type);
@@ -497,7 +483,7 @@ static H5FD_safe_vfm_t * H5FD_safe_vfm_new(int64_t size);
 static void H5FD_safe_vfm_delete(H5FD_safe_vfm_t * ths);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_find_node(H5FD_safe_vfm_t * ths, int64_t offset);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_split(H5FD_safe_vfm_t * ths, int64_t offset);
-static H5FD_safe_vfm_t * H5FD_safe_vfm_insert(H5FD_safe_vfm_t * ths, int64_t voffset, int64_t roffset, int64_t size);
+static H5FD_safe_vfm_t * H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset, int64_t roffset, int64_t size);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_truncate(H5FD_safe_vfm_t * ths, size_t size);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_grow(H5FD_safe_vfm_t * ths, size_t size);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_remove(H5FD_safe_vfm_t * ths, H5FD_safe_vfm_t * first, H5FD_safe_vfm_t * last);
@@ -505,7 +491,7 @@ static void H5FD_safe_vfm_print(H5FD_safe_vfm_t * ths);
 static H5FD_safe_vfm_t * H5FD_safe_vfm_extract(H5FD_safe_vfm_t * ths, int64_t offset, int64_t size);
 
 
-static herr_t H5FD_safe_replay_log(char const * filename, char const * log_filename);
+//static herr_t H5FD_safe_replay_log(char const * filename, char const * log_filename);
 
 static herr_t H5FD_safe_virtual_truncate(H5FD_safe_t * file, size_t size);
 
@@ -549,31 +535,31 @@ H5FL_DEFINE_STATIC(H5FD_safe_t);
 
 static herr_t
 H5FD_safe_write_log_msg(H5FD_safe_t * file, H5FD_safe_log_msg_t * ths) {
-	if(file->log_handler.free_log_size < (sizeof(H5FD_safe_log_msg_t)*2)) {
-		H5FD_safe_log_msg_t msg;
-		memset(&msg, 0, sizeof(H5FD_safe_log_msg_t));
-		int64_t laddr = H5FD_safe_alloc(file, 8192);
-		msg.m_extend_log.next_addr = laddr;
-		msg.m_extend_log.size = 8192;
-		msg.m_extend_log.type = H5FD_SAFE_MSG_EXTEND_LOG;
-		msg.m_extend_log.file_id = file->file_id;
-		msg.m_extend_log.log_id = file->log_fd;
-		msg.m_extend_log.check_sum = 0;
-		msg.m_extend_log.check_sum = H5_checksum_fletcher32(&msg, sizeof(H5FD_safe_log_msg_t));
-
-		HDlseek(file->fd, file->log_handler.current_file_offset, SEEK_SET);
-		HDwrite(file->fd, &msg, sizeof(H5FD_safe_log_msg_t));
-
-    	file->log_handler.current_file_offset = laddr;
-    	file->log_handler.free_log_size = 8192;
-	}
-
-	HDlseek(file->fd, file->log_handler.current_file_offset, SEEK_SET);
-	HDwrite(file->fd, ths, sizeof(H5FD_safe_log_msg_t));
-	file->log_handler.current_file_offset += sizeof(H5FD_safe_log_msg_t);
-	file->log_handler.free_log_size -= sizeof(H5FD_safe_log_msg_t);
-
-	return 0;
+//	if(file->log_handler.free_log_size < (sizeof(H5FD_safe_log_msg_t)*2)) {
+//		H5FD_safe_log_msg_t msg;
+//		memset(&msg, 0, sizeof(H5FD_safe_log_msg_t));
+//		int64_t laddr = H5FD_safe_alloc(file, 8192);
+//		msg.m_extend_log.next_addr = laddr;
+//		msg.m_extend_log.size = 8192;
+//		msg.m_extend_log.type = H5FD_SAFE_MSG_EXTEND_LOG;
+//		msg.m_extend_log.file_id = file->file_id;
+//		msg.m_extend_log.log_id = file->log_fd;
+//		msg.m_extend_log.check_sum = 0;
+//		msg.m_extend_log.check_sum = H5_checksum_fletcher32(&msg, sizeof(H5FD_safe_log_msg_t));
+//
+//		HDlseek(file->fd, file->log_handler.current_file_offset, SEEK_SET);
+//		HDwrite(file->fd, &msg, sizeof(H5FD_safe_log_msg_t));
+//
+//    	file->log_handler.current_file_offset = laddr;
+//    	file->log_handler.free_log_size = 8192;
+//	}
+//
+//	HDlseek(file->fd, file->log_handler.current_file_offset, SEEK_SET);
+//	HDwrite(file->fd, ths, sizeof(H5FD_safe_log_msg_t));
+//	file->log_handler.current_file_offset += sizeof(H5FD_safe_log_msg_t);
+//	file->log_handler.free_log_size -= sizeof(H5FD_safe_log_msg_t);
+//
+//	return 0;
 
 }
 
@@ -581,6 +567,10 @@ H5FD_safe_write_log_msg(H5FD_safe_t * file, H5FD_safe_log_msg_t * ths) {
 
 static int64_t
 H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
+	printf("H5FD_safe_alloc(%ld)\n", size);
+	H5FD_safe_alloc_list_print(file->free, "Before free");
+	H5FD_safe_alloc_list_print(file->used, "Before used");
+
 
 	H5FD_safe_alloc_list_t * cur = file->free;
 	while(cur != NULL) {
@@ -595,6 +585,11 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 	if(cur->size == size) {
 		H5FD_safe_alloc_list_remove(file->free, cur);
 		file->used = H5FD_safe_alloc_list_add(file->used, cur);
+
+		H5FD_safe_alloc_list_print(file->free, "After free");
+		H5FD_safe_alloc_list_print(file->used, "After used");
+
+
 		return cur->offset;
 	} else {
 		H5FD_safe_alloc_list_t * x;
@@ -603,6 +598,11 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 		cur->size -= size;
 		x = H5FD_safe_alloc_list_new_node(offset, size);
 		file->used = H5FD_safe_alloc_list_add(file->used, x);
+
+		H5FD_safe_alloc_list_print(file->free, "After free");
+		H5FD_safe_alloc_list_print(file->used, "After used");
+
+
 		return  offset;
 	}
 
@@ -610,8 +610,14 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 
 static void
 H5FD_safe_free(H5FD_safe_t * file, int64_t offset, int64_t size) {
+	H5FD_safe_alloc_list_t * cur;
+	return; /** never free **/
+	printf("H5FD_safe_free(%ld,%ld)\n", offset, size);
+	H5FD_safe_alloc_list_print(file->free, "Before free");
+	H5FD_safe_alloc_list_print(file->used, "Before used");
 
-	H5FD_safe_alloc_list_t * cur = file->used;
+
+	cur == file->used;
 	while(cur != NULL) {
 		int64_t min = MIN(offset, cur->offset);
 		int64_t max = MAX(offset + size, cur->offset + cur->size);
@@ -650,6 +656,9 @@ H5FD_safe_free(H5FD_safe_t * file, int64_t offset, int64_t size) {
 		}
 	}
 
+	H5FD_safe_alloc_list_print(file->free, "After free");
+	H5FD_safe_alloc_list_print(file->used, "After used");
+
 }
 
 static H5FD_safe_vfm_t *
@@ -666,8 +675,11 @@ H5FD_safe_vfm_extract(H5FD_safe_vfm_t * ths, int64_t offset, int64_t size) {
 		if(x_end - x_start > 0) {
 			/* create new node */
 			H5FD_safe_vfm_t * x = (H5FD_safe_vfm_t *) malloc(sizeof(H5FD_safe_vfm_t));
-			x->file_source = cur_src->file_source;
-			x->roffset = cur_src->roffset + x_start - cur_src->voffset;
+			if (x->roffset > 0) {
+				x->roffset = cur_src->roffset + x_start - cur_src->voffset;
+			} else {
+				x->roffset = -1;
+			}
 			x->voffset = x_start;
 			x->size = x_end - x_start;
 			x->prev = cur_ret;
@@ -690,6 +702,31 @@ H5FD_safe_vfm_extract(H5FD_safe_vfm_t * ths, int64_t offset, int64_t size) {
 
 }
 
+static H5FD_safe_vfm_t *
+H5FD_safe_vfm_cleanup(H5FD_safe_vfm_t * ths) {
+	printf("H5FD_safe_alloc_list_cleanup(%p)\n", ths);
+	H5FD_safe_alloc_list_print(ths, "anonymous");
+	H5FD_safe_vfm_t * i = ths;
+	while(i != NULL) {
+		H5FD_safe_vfm_t * j = i->next;
+		while(j != NULL) {
+			if((i->voffset + i->size) == j->voffset && (i->roffset + i->size == j->roffset)) {
+				i->size = j->voffset + j->size - i->voffset;
+				i->next = j->next;
+				if(j->next != NULL)
+					j->next->prev = i;
+
+				free(j);
+				j = i->next;
+			} else {
+				j = j->next;
+			}
+		}
+		i = i->next;
+	}
+	return ths;
+}
+
 
 static void
 H5FD_safe_vfm_print(H5FD_safe_vfm_t * ths) {
@@ -698,23 +735,8 @@ H5FD_safe_vfm_print(H5FD_safe_vfm_t * ths) {
 	while(cur != NULL) {
 		char const * s = NULL;
 
-		switch(cur->file_source) {
-		case H5FD_SAFE_SRC_FILE:
-			s = "FILE";
-			break;
-		case H5FD_SAFE_SRC_LOG:
-			s = "LOG";
-			break;
-		case H5FD_SAFE_SRC_EMPTY:
-			s = "EMPTY";
-			break;
-		default:
-			s = "UNKNOW";
-			break;
-		}
-
-		printf("start = %ld, end = %ld, poffset = %ld, size = %ld, type = %s, cur = %p, next = %p, prev = %p\n",
-				cur->voffset, cur->voffset + cur->size, cur->roffset, cur->size, s, cur, cur->next, cur->prev);
+		printf("start = %ld, end = %ld, poffset = %ld, size = %ld, cur = %p, next = %p, prev = %p\n",
+				cur->voffset, cur->voffset + cur->size, cur->roffset, cur->size, cur, cur->next, cur->prev);
 
 		if(cur->next != NULL) {
 			if(cur->voffset + cur->size != cur->next->voffset)
@@ -748,7 +770,6 @@ H5FD_safe_vfm_new(int64_t size) {
 	ret_value->voffset = 0;
 	ret_value->roffset = 0;
 	ret_value->size = size;
-	ret_value->file_source = H5FD_SAFE_SRC_FILE;
 	ret_value->next = NULL;
 	ret_value->prev = NULL;
 
@@ -760,6 +781,15 @@ H5FD_safe_vfm_new(int64_t size) {
 static void
 H5FD_safe_vfm_delete(H5FD_safe_vfm_t * ths) {
 	H5FD_safe_vfm_remove(ths, ths, NULL);
+}
+
+static int
+H5FD_safe_vfm_count(H5FD_safe_vfm_t * ths) {
+	int ret = 0;
+	while(ths != NULL) {
+		++ret;
+		ths = ths->next;
+	}
 }
 
 static H5FD_safe_vfm_t *
@@ -788,9 +818,12 @@ H5FD_safe_vfm_split(H5FD_safe_vfm_t * ths, int64_t offset) {
 
 		/* create new node */
 		insert->voffset = offset;
-		insert->roffset = node->roffset + offset - node->voffset;
+		if (node->roffset > 0) {
+			insert->roffset = node->roffset + offset - node->voffset;
+		} else {
+			insert->roffset = -1;
+		}
 		insert->size = node->voffset + node->size - offset;
-		insert->file_source = node->file_source;
 		insert->next = node->next;
 		insert->prev = node;
 
@@ -813,9 +846,9 @@ static H5FD_safe_vfm_t *
 H5FD_safe_vfm_remove(H5FD_safe_vfm_t * ths, H5FD_safe_vfm_t * first, H5FD_safe_vfm_t * last) {
 	H5FD_safe_vfm_t * ret_value, * cur;
 
-	printf("H5FD_safe_vfm_remove(%p,%p,%p)\n", ths, first, last);
+	//printf("H5FD_safe_vfm_remove(%p,%p,%p)\n", ths, first, last);
 
-	H5FD_safe_vfm_print(ths);
+	//H5FD_safe_vfm_print(ths);
 
 	if(ths == NULL)
 		return ths;
@@ -859,7 +892,7 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
 	H5FD_safe_vfm_t * node_last;
 	H5FD_safe_vfm_t * cur;
 
-	printf("H5FD_safe_vfm_insert(voffset=%ld,roffset=%ld,size=%ld)\n", voffset, roffset, size);
+	//printf("H5FD_safe_vfm_insert(voffset=%ld,roffset=%ld,size=%ld)\n", voffset, roffset, size);
 
 	/**
 	 * trick to have plain node on voffset and voffset+size;
@@ -873,7 +906,7 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
 	node_first = H5FD_safe_vfm_find_node(ths, voffset);
 	node_last = H5FD_safe_vfm_find_node(ths, voffset + size);
 
-	H5FD_safe_vfm_print(ths);
+	//H5FD_safe_vfm_print(ths);
 
 	HDassert(node_first != NULL);
 	HDassert(node_first->voffset == voffset);
@@ -882,7 +915,7 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
 	/* free corresponding nodes */
 	cur = node_first;
 	while(cur != node_last) {
-		if(cur->roffset < 0 || cur->file_source != H5FD_SAFE_SRC_EMPTY) {
+		if(cur->roffset > 0) {
 			/** free only unprotected data, because protected data never go in file->used or file->free **/
 			H5FD_safe_free(file, cur->roffset, cur->size);
 		}
@@ -893,10 +926,9 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
 
 	/** update node_first **/
 	node_first->roffset = roffset;
-	node_first->file_source = H5FD_SAFE_SRC_LOG;
 	node_first->size = size;
 
-	H5FD_safe_vfm_print(ths);
+	//H5FD_safe_vfm_print(ths);
 
 	return ths;
 
@@ -920,157 +952,157 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
  *  valid state.
  *
  **/
-static herr_t
-H5FD_safe_replay_log(char const * filename, char const * log_filename) {
-
-	int fd;
-	int log_fd;
-	h5_stat_t sb;
-	H5FD_safe_vfm_t * map;
-	H5FD_safe_log_msg_t hdr;
-	int64_t max_write_size = 0;
-	int valid_log = 0;
-
-	printf("Replay journal for '%s' with '%s'\n", filename, log_filename);
-
-	fd = HDopen(filename, O_RDWR, 0666);
-	if(fd < 0) {
-		printf("fail to open '%s'\n", filename);
-		return -1;
-	}
-
-	log_fd = HDopen(log_filename, O_RDONLY, 0444);
-	if(log_fd < 0) {
-		printf("fail to open '%s'\n", log_filename);
-		return -1;
-	}
-
-	HDfstat(fd, &sb);
-	map = H5FD_safe_vfm_new(sb.st_size);
-
-	HDlseek(log_fd, 0, SEEK_SET);
-
-	/**
-	 * Step 1. check if log file is valid.
-	 **/
-	while(1) {
-		if(HDread(log_fd, &hdr, sizeof(H5FD_safe_log_msg_t)) < (ssize_t)sizeof(H5FD_safe_log_msg_t)) {
-			printf("fail to read header\n");
-			/* invalid log */
-			break;
-		}
-
-		if(hdr.type == H5FD_SAFE_MSG_WRITE) {
-			if(max_write_size < hdr.m_any.size) {
-				max_write_size = hdr.m_any.size;
-			}
-
-			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_write.type], hdr.m_write.size);
-
-		} else if (hdr.type == H5FD_SAFE_MSG_CLOSE_FILE) {
-			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_any.type], hdr.m_any.size);
-			valid_log = 1;
-			break;
-		} else if (hdr.type == H5FD_SAFE_MSG_TRUNCATE) {
-			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_any.type], hdr.m_any.size);
-
-			/** continue **/
-		} else {
-			/** unknown type => invalid log **/
-			break;
-		}
-
-
-		/* goto next message */
-		HDlseek(log_fd, hdr.m_any.size, SEEK_CUR);
-
-	}
-
-	/**
-	 * if log is valid go rebuild virtual file map.
-	 **/
-
-	if(valid_log == 1) {
-
-		/** go back to begin **/
-		HDlseek(log_fd, 0, SEEK_SET);
-
-		while(1) {
-			if(HDread(log_fd, &hdr, sizeof(hdr)) < sizeof(hdr)) {
-				/* should not fail ... */
-				return -1;
-			}
-
-			if(hdr.type == H5FD_SAFE_MSG_WRITE) {
-				map = H5FD_safe_vfm_grow(map, (size_t)(hdr.m_write.voffset + hdr.m_write.size));
-				map = H5FD_safe_vfm_insert(map, hdr.m_write.voffset, HDlseek(log_fd, 0, SEEK_CUR), hdr.m_write.size);
-			} else if (hdr.type == H5FD_SAFE_MSG_CLOSE_FILE) {
-				break;
-			} else if (hdr.type == H5FD_SAFE_MSG_TRUNCATE) {
-				map = H5FD_safe_vfm_truncate(map, (size_t)hdr.m_trunk.truncate_to);
-			} else {
-				/** unexpected someone are writing log file ? **/
-				return -1;
-			}
-
-			/* goto next message */
-			HDlseek(log_fd, hdr.m_any.size, SEEK_CUR);
-
-		}
-
-		/* replay MAP */
-		printf("Replay MAP\n");
-		H5FD_safe_vfm_print(map);
-
-		/**
-		 * write operation.
-		 **/
-
-		{
-			H5FD_safe_vfm_t * cur = map;
-
-			/** Allocate the maximum needed write size **/
-			unsigned char * buf = (unsigned char *)malloc((size_t)max_write_size);
-			if(buf == NULL)
-				return -1;
-
-
-			while(cur != NULL) {
-				if(cur->file_source == H5FD_SAFE_SRC_LOG) {
-
-					/* read from log */
-					HDlseek(log_fd, cur->roffset, SEEK_SET);
-					if(HDread(log_fd, buf, (size_t)cur->size) < 0)
-						return -1;
-
-					/* write to hdf5 file */
-
-					printf("H5FD_safe_write(FILE,%ld,%ld)\n", cur->voffset, cur->size);
-					HDlseek(fd, cur->voffset, SEEK_SET);
-					if(HDwrite(fd, buf, (size_t)cur->size) < 0)
-						return -1;
-				}
-
-				cur = cur->next;
-			}
-
-			free(buf);
-		}
-
-		fsync(fd);
-		close(fd);
-		close(log_fd);
-
-		H5FD_safe_vfm_delete(map);
-
-		/** now we can trash log file **/
-	} else {
-		return -1;
-	}
-
-	return 0;
-
-}
+//static herr_t
+//H5FD_safe_replay_log(char const * filename, char const * log_filename) {
+//
+//	int fd;
+//	int log_fd;
+//	h5_stat_t sb;
+//	H5FD_safe_vfm_t * map;
+//	H5FD_safe_log_msg_t hdr;
+//	int64_t max_write_size = 0;
+//	int valid_log = 0;
+//
+//	printf("Replay journal for '%s' with '%s'\n", filename, log_filename);
+//
+//	fd = HDopen(filename, O_RDWR, 0666);
+//	if(fd < 0) {
+//		printf("fail to open '%s'\n", filename);
+//		return -1;
+//	}
+//
+//	log_fd = HDopen(log_filename, O_RDONLY, 0444);
+//	if(log_fd < 0) {
+//		printf("fail to open '%s'\n", log_filename);
+//		return -1;
+//	}
+//
+//	HDfstat(fd, &sb);
+//	map = H5FD_safe_vfm_new(sb.st_size);
+//
+//	HDlseek(log_fd, 0, SEEK_SET);
+//
+//	/**
+//	 * Step 1. check if log file is valid.
+//	 **/
+//	while(1) {
+//		if(HDread(log_fd, &hdr, sizeof(H5FD_safe_log_msg_t)) < (ssize_t)sizeof(H5FD_safe_log_msg_t)) {
+//			printf("fail to read header\n");
+//			/* invalid log */
+//			break;
+//		}
+//
+//		if(hdr.type == H5FD_SAFE_MSG_WRITE) {
+//			if(max_write_size < hdr.m_any.size) {
+//				max_write_size = hdr.m_any.size;
+//			}
+//
+//			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_write.type], hdr.m_write.size);
+//
+//		} else if (hdr.type == H5FD_SAFE_MSG_CLOSE_FILE) {
+//			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_any.type], hdr.m_any.size);
+//			valid_log = 1;
+//			break;
+//		} else if (hdr.type == H5FD_SAFE_MSG_TRUNCATE) {
+//			printf("header type = %s, size = %d\n", s_mesage_type[hdr.m_any.type], hdr.m_any.size);
+//
+//			/** continue **/
+//		} else {
+//			/** unknown type => invalid log **/
+//			break;
+//		}
+//
+//
+//		/* goto next message */
+//		HDlseek(log_fd, hdr.m_any.size, SEEK_CUR);
+//
+//	}
+//
+//	/**
+//	 * if log is valid go rebuild virtual file map.
+//	 **/
+//
+//	if(valid_log == 1) {
+//
+//		/** go back to begin **/
+//		HDlseek(log_fd, 0, SEEK_SET);
+//
+//		while(1) {
+//			if(HDread(log_fd, &hdr, sizeof(hdr)) < sizeof(hdr)) {
+//				/* should not fail ... */
+//				return -1;
+//			}
+//
+//			if(hdr.type == H5FD_SAFE_MSG_WRITE) {
+//				map = H5FD_safe_vfm_grow(map, (size_t)(hdr.m_write.voffset + hdr.m_write.size));
+//				map = H5FD_safe_vfm_insert(map, hdr.m_write.voffset, HDlseek(log_fd, 0, SEEK_CUR), hdr.m_write.size);
+//			} else if (hdr.type == H5FD_SAFE_MSG_CLOSE_FILE) {
+//				break;
+//			} else if (hdr.type == H5FD_SAFE_MSG_TRUNCATE) {
+//				map = H5FD_safe_vfm_truncate(map, (size_t)hdr.m_trunk.truncate_to);
+//			} else {
+//				/** unexpected someone are writing log file ? **/
+//				return -1;
+//			}
+//
+//			/* goto next message */
+//			HDlseek(log_fd, hdr.m_any.size, SEEK_CUR);
+//
+//		}
+//
+//		/* replay MAP */
+//		printf("Replay MAP\n");
+//		H5FD_safe_vfm_print(map);
+//
+//		/**
+//		 * write operation.
+//		 **/
+//
+//		{
+//			H5FD_safe_vfm_t * cur = map;
+//
+//			/** Allocate the maximum needed write size **/
+//			unsigned char * buf = (unsigned char *)malloc((size_t)max_write_size);
+//			if(buf == NULL)
+//				return -1;
+//
+//
+//			while(cur != NULL) {
+//				if(cur->file_source == H5FD_SAFE_SRC_LOG) {
+//
+//					/* read from log */
+//					HDlseek(log_fd, cur->roffset, SEEK_SET);
+//					if(HDread(log_fd, buf, (size_t)cur->size) < 0)
+//						return -1;
+//
+//					/* write to hdf5 file */
+//
+//					printf("H5FD_safe_write(FILE,%ld,%ld)\n", cur->voffset, cur->size);
+//					HDlseek(fd, cur->voffset, SEEK_SET);
+//					if(HDwrite(fd, buf, (size_t)cur->size) < 0)
+//						return -1;
+//				}
+//
+//				cur = cur->next;
+//			}
+//
+//			free(buf);
+//		}
+//
+//		fsync(fd);
+//		close(fd);
+//		close(log_fd);
+//
+//		H5FD_safe_vfm_delete(map);
+//
+//		/** now we can trash log file **/
+//	} else {
+//		return -1;
+//	}
+//
+//	return 0;
+//
+//}
 
 /** return 0 if log is valid or -1 if log is invalid **/
 static herr_t
@@ -1144,50 +1176,32 @@ static ssize_t H5FD_safe_virtual_write(H5FD_safe_t * file, void const * buf, int
 	int64_t raddr;
 
 	/** write to log file **/
-	H5FD_safe_log_msg_t header;
+	//H5FD_safe_log_msg_t header;
 
 	printf("H5FD_safe_virtual_write(%ld,%ld)\n", addr, size);
 
-	HDassert(file->log_fd != -1);
+	//HDassert(file->log_fd != -1);
 
 	H5FD_safe_vfm_print(file->map);
 
 	/** allocate file area **/
-	raddr = H5FD_safe_alloc(file, size);
+	raddr = H5FD_safe_alloc(file, (int64_t)size);
 
 	/* write data to this area */
 	HDlseek(file->fd, raddr, SEEK_SET);
-	ret_value = HDwrite(file->fd, buf, size);
-	printf("writed data : %d %d\n", size, ret_value);
+	do {
+		ret_value = HDwrite(file->fd, buf, size);
+	} while (-1 == ret_value && EINTR == errno);
+	//printf("writed data : %d %d\n", size, ret_value);
 
-	/** write log message **/
-	memset(&header, 0, sizeof(H5FD_safe_log_msg_t));
-	header.m_write.file_id = file->file_id;
-	header.m_write.log_id = file->log_id;
-	header.m_write.type = H5FD_SAFE_MSG_WRITE;
-	header.m_write.size = (int64_t)size;
-	header.m_write.voffset = addr;
-	header.m_write.roffset = raddr;
-	header.m_write.check_sum = H5_checksum_fletcher32(&header, sizeof(H5FD_safe_log_msg_t));
-
-	HDlseek(file->log_fd, 0, SEEK_END);
-	ret_value = H5FD_safe_write_log_msg(file, &header);
-
-	printf("writed Header : %ld %ld\n", sizeof(H5FD_safe_log_msg_t), ret_value);
-
-	if(ret_value < (int64_t)sizeof(header))
-		return -1;
-
-	/* grow if needed */
-	H5FD_safe_vfm_print(file->map);
-	file->map = H5FD_safe_vfm_grow(file->map, (size_t)(header.m_write.voffset + header.m_write.size));
+	//H5FD_safe_vfm_print(file->map);
+	file->map = H5FD_safe_vfm_grow(file->map, (size_t) (addr + size));
 	//printf("Grow:\n");
-	H5FD_safe_vfm_print(file->map);
-	file->map = H5FD_safe_vfm_insert(file, file->map, header.m_write.voffset, (int64_t)HDlseek(file->log_fd, 0, SEEK_CUR), (int64_t)size);
+	//H5FD_safe_vfm_print(file->map);
+	file->map = H5FD_safe_vfm_insert(file, file->map, addr, raddr,
+			(int64_t) size);
+	//H5FD_safe_vfm_print(file->map);
 
-	printf("seek = %d\n", (int64_t)HDlseek(file->log_fd, 0, SEEK_CUR));
-
-	H5FD_safe_vfm_print(file->map);
 	return ret_value;
 
 }
@@ -1206,25 +1220,25 @@ H5FD_safe_virtual_read(H5FD_safe_t * file, void * buf, int64_t addr, size_t cons
 	/* extract current read from map */
 	ext = H5FD_safe_vfm_extract(file->map, voffset, (int64_t)size);
 	//H5FD_safe_vfm_print(file->map);
-	printf("Extracted:\n");
-	H5FD_safe_vfm_print(ext);
+	//printf("Extracted:\n");
+	//H5FD_safe_vfm_print(ext);
 
 	cur = ext;
 	xbuf = (unsigned char *)buf;
 	while(cur != NULL) {
-		if(cur->file_source == H5FD_SAFE_SRC_FILE) {
+		if(cur->roffset > 0) {
 			int64_t read_size = 0;
 
-			if(HDlseek(file->fd, cur->voffset, SEEK_SET) < 0)
+			if(HDlseek(file->fd, cur->roffset, SEEK_SET) < 0)
 				return -1;
 
-			printf("H5FD_safe_virtual_read(FILE,%p,%ld,%ld)\n", xbuf, cur->voffset, cur->size);
+			printf("H5FD_safe_virtual_read(FILE,%p,%ld,%ld)\n", xbuf, cur->roffset, cur->size);
 
 			do {
 				(read_size = (int64_t)HDread(file->fd, xbuf, cur->size));
 	        } while(-1 == read_size && EINTR == errno);
 
-			printf("Readed %ld %d\n", read_size, errno);
+			//printf("Readed %ld %d\n", read_size, errno);
 			if(read_size < cur->size) {
 				return ret_value + read_size;
 			}
@@ -1232,25 +1246,6 @@ H5FD_safe_virtual_read(H5FD_safe_t * file, void * buf, int64_t addr, size_t cons
 			xbuf += read_size;
 			ret_value += read_size;
 
-		} else if (cur->file_source == H5FD_SAFE_SRC_LOG) {
-			int64_t read_size = 0;
-
-			if(HDlseek(file->log_fd, cur->roffset, SEEK_SET) < 0)
-				return -1;
-
-			printf("H5FD_safe_virtual_read(LOG,%p,%ld,%ld)\n", xbuf, cur->voffset, cur->size);
-			do {
-				(read_size = (int64_t)HDread(file->log_fd, xbuf, cur->size));
-	        } while(-1 == read_size && EINTR == errno);
-
-			printf("Readed %ld\n", read_size);
-
-			if(read_size < cur->size) {
-				return ret_value + read_size;
-			}
-
-			xbuf += read_size;
-			ret_value += read_size;
 		}
 
 		cur = cur->next;
@@ -1283,10 +1278,10 @@ H5FD_safe_vfm_truncate(H5FD_safe_vfm_t * ths, size_t size) {
 static H5FD_safe_vfm_t *
 H5FD_safe_vfm_grow(H5FD_safe_vfm_t * ths, size_t size) {
 
+
 	if (ths == NULL) {
 		/* the lis is empty, grow size */
 		ths = (H5FD_safe_vfm_t *) malloc(sizeof(H5FD_safe_vfm_t));
-		ths->file_source = H5FD_SAFE_SRC_EMPTY;
 		ths->voffset = 0;
 		ths->roffset = -1;
 		ths->next = NULL;
@@ -1303,7 +1298,6 @@ H5FD_safe_vfm_grow(H5FD_safe_vfm_t * ths, size_t size) {
 
 		if (node->voffset + node->size < (int64_t) size) {
 			node->next = (H5FD_safe_vfm_t *) malloc(sizeof(H5FD_safe_vfm_t));
-			node->next->file_source = H5FD_SAFE_SRC_EMPTY;
 			node->next->voffset = node->voffset + node->size;
 			node->next->roffset = -1;
 			node->next->size = (int64_t) size - node->next->voffset;
@@ -1317,34 +1311,32 @@ H5FD_safe_vfm_grow(H5FD_safe_vfm_t * ths, size_t size) {
 }
 
 static void
-H5FD_safe_vfm_serialize(H5FD_safe_vfm_t * ths, uint64_t file_id, uint64_t log_id, char ** data, int64_t * size) {
+H5FD_safe_vfm_serialize(H5FD_safe_vfm_t * ths, uint64_t file_id, uint64_t log_id, char ** data, uint64_t * count, int64_t * size) {
 	H5FD_safe_vfm_t * cur;
 	int i;
 	H5FD_safe_vfm_serialize_header_t * hdr;
 	H5FD_safe_vfm_serialize_node_t * nodes;
 	uint64_t * data_check_sum;
+	uint64_t node_count = 0;
+
+	printf("H5FD_safe_vfm_serialize(%lu,%lu)\n", file_id, log_id);
+	H5FD_safe_vfm_print(ths);
 
 	if(data == NULL || size == NULL)
 		return;
 
-	uint64_t node_count = 0;
 	cur = ths;
 	while(cur != NULL) {
 		++node_count;
 		cur = cur->next;
 	}
 
-	*size = (int64_t)(sizeof(H5FD_safe_vfm_serialize_header_t) + sizeof(H5FD_safe_vfm_serialize_node_t) * node_count + sizeof(uint64_t));
+	*count = node_count;
+	*size = sizeof(H5FD_safe_vfm_serialize_node_t) * node_count + sizeof(uint64_t);
 	*data = (char *)malloc((uint64_t)*size);
+	nodes = (H5FD_safe_vfm_serialize_node_t*)&((*data)[0]);
+	data_check_sum = (uint64_t*)&((*data)[sizeof(H5FD_safe_vfm_serialize_node_t) * node_count]);
 
-	hdr = (H5FD_safe_vfm_serialize_header_t*)&((*data)[0]);
-	nodes = (H5FD_safe_vfm_serialize_node_t*)&(*data[sizeof(H5FD_safe_vfm_serialize_header_t)]);
-	data_check_sum = (uint64_t*)&(*data[sizeof(H5FD_safe_vfm_serialize_header_t) + sizeof(H5FD_safe_vfm_serialize_node_t) * node_count]);
-
-	hdr->hdr_check_sum = 0;
-	hdr->node_count = node_count;
-	hdr->file_id = file_id;
-	hdr->log_id = log_id;
 	cur = ths;
 	i = 0;
 	while(cur != NULL) {
@@ -1356,68 +1348,146 @@ H5FD_safe_vfm_serialize(H5FD_safe_vfm_t * ths, uint64_t file_id, uint64_t log_id
 	}
 
 	/** make the final checksum **/
-	hdr->hdr_check_sum = H5_checksum_fletcher32(*data, sizeof(H5FD_safe_vfm_serialize_header_t));
-	*data_check_sum = H5_checksum_fletcher32(nodes, sizeof(H5FD_safe_vfm_serialize_node_t) * node_count);
+	*data_check_sum = H5_checksum_fletcher32(*data, sizeof(H5FD_safe_vfm_serialize_node_t) * node_count);
 
 }
 
 static herr_t
-H5FD_safe_vfm_unserialize(H5FD_safe_t * file, int64_t offset, H5FD_safe_virtual_file_map_t ** ths) {
-	H5FD_safe_vfm_t ** cur;
+H5FD_safe_vfm_unserialize(int fd, int64_t offset, uint64_t count, H5FD_safe_virtual_file_map_t ** ths, int64_t * size) {
+	H5FD_safe_vfm_t ** cur, * prev;
 	int i;
-	H5FD_safe_vfm_serialize_header_t xxx;
 	uint64_t hdr_check_sum;
 	uint64_t tmp_check_sum;
 
 	H5FD_safe_vfm_serialize_node_t * nodes;
 
-	HDlseek(file->fd, offset, SEEK_SET);
-	HDread(file->fd, &xxx, sizeof(H5FD_safe_vfm_serialize_header_t));
+	printf("H5FD_safe_vfm_unserialize()\n");
 
-	hdr_check_sum = xxx.hdr_check_sum;
-	xxx.hdr_check_sum = 0;
-	tmp_check_sum = H5_checksum_fletcher32(&xxx, sizeof(H5FD_safe_vfm_serialize_header_t));
-	if(tmp_check_sum != hdr_check_sum) {
+	HDlseek(fd, offset, SEEK_SET);
+
+	*size = (int64_t)(sizeof(H5FD_safe_vfm_serialize_node_t) * count + sizeof(uint64_t));
+	nodes = (H5FD_safe_vfm_serialize_node_t *)malloc(sizeof(H5FD_safe_vfm_serialize_node_t) * count);
+	if(HDread(fd, nodes, sizeof(H5FD_safe_vfm_serialize_node_t) * count) < 0)
 		return -1;
-	}
-
-	nodes = (H5FD_safe_vfm_serialize_node_t *)malloc(sizeof(H5FD_safe_vfm_serialize_node_t) * xxx.node_count);
-	HDread(file->fd, nodes, sizeof(H5FD_safe_vfm_serialize_node_t) * xxx.node_count);
-	HDread(file->fd, &hdr_check_sum, sizeof(uint64_t));
-	tmp_check_sum = H5_checksum_fletcher32(nodes, sizeof(H5FD_safe_vfm_serialize_node_t) * xxx.node_count);
+	if(HDread(fd, &hdr_check_sum, sizeof(uint64_t)) < 0)
+		return -1;
+	tmp_check_sum = H5_checksum_fletcher32(nodes, sizeof(H5FD_safe_vfm_serialize_node_t) * count);
 	if(tmp_check_sum != hdr_check_sum) {
 		return -1;
 	}
 
 	cur = ths;
-	for(i = 0 ; i < xxx.node_count; ++i) {
+	prev = NULL;
+	for(i = 0 ; i < count; ++i) {
 		H5FD_safe_virtual_file_map_t * node = (H5FD_safe_virtual_file_map_t *)malloc(sizeof(H5FD_safe_virtual_file_map_t));
 		node->voffset = nodes[i].voffset;
 		node->roffset = nodes[i].roffset;
 		node->size = nodes[i].size;
-		node->file_source = H5FD_SAFE_SRC_FILE;
-		node->prev = *cur;
+		node->prev = prev;
+		prev = node;
 		*cur = node;
-		cur = &((*cur)->next);
+		cur = &(node->next);
 	}
 
+	*cur = NULL;
+
 	free(nodes);
+
+	printf("Unserialized map:\n");
+	H5FD_safe_vfm_print(*ths);
 
 	return 0;
 
 }
 
+static uint64_t
+H5FD_safe_vfm_file_size(H5FD_safe_vfm_t * ths) {
+	H5FD_safe_vfm_t * cur = ths;
+	if (cur != NULL) {
+		while (cur->next != NULL) {
+			cur = cur->next;
+		}
+		return cur->voffset + cur->size;
+	} else {
+		return 0;
+	}
+}
+
+static herr_t
+H5FD_safe_load_log(H5FD_safe_t * file, H5FD_safe_log_header_t * log, H5FD_safe_virtual_file_map_t ** map, int64_t * size) {
+	/** check first log **/
+	uint64_t tmp_checksum;
+	uint64_t ref_checksum = log->check_sum;
+
+	log->check_sum = 0;
+	tmp_checksum = H5_checksum_fletcher32(log, sizeof(H5FD_safe_log_header_t));
+	if (tmp_checksum != ref_checksum)
+		return -1;
+
+	if(log->file_map_offset == 0)
+		return -1;
+
+	*map = NULL;
+	if(H5FD_safe_vfm_unserialize(file->fd, log->file_map_offset, log->file_map_fragment_count, map, size) < 0)
+		return -1;
+
+	return 0;
+}
+
+static herr_t
+H5FD_safe_log_select(H5FD_safe_t * file,
+		H5FD_safe_log_header_t * log, H5FD_safe_virtual_file_map_t * map,
+		int64_t size) {
+	H5FD_safe_alloc_list_t * x;
+
+	file->map = map;
+	file->free = NULL;
+	file->used = NULL;
+	file->prot = NULL;
+
+	/* Add headers as protected */
+	x = H5FD_safe_alloc_list_new_node(0, sizeof(H5FD_safe_file_header_t));
+	file->prot = H5FD_safe_alloc_list_add(file->prot, x);
+
+		/* Add current map file as protected */
+		x = H5FD_safe_alloc_list_new_node(
+				log->file_map_offset, size);
+		file->prot = H5FD_safe_alloc_list_add(file->prot, x);
+
+
+	{
+		/** add current allocated data **/
+		H5FD_safe_virtual_file_map_t * cur = file->map;
+		while (cur != NULL) {
+			if (cur->roffset > 0) {
+				x = H5FD_safe_alloc_list_new_node(cur->roffset, cur->size);
+				file->prot = H5FD_safe_alloc_list_add(file->prot, x);
+			}
+			cur = cur->next;
+		}
+	}
+
+	/* set free space */
+	file->free = H5FD_safe_negative_mask(file->prot);
+	H5FD_safe_alloc_list_print(file->prot, "Protected file sections");
+	H5FD_safe_alloc_list_print(file->free, "Initial Free");
+
+	return 0;
+}
+
 static herr_t
 H5FD_safe_virtual_truncate(H5FD_safe_t * file, size_t size) {
-	H5FD_safe_log_msg_t msg;
+	//H5FD_safe_log_msg_t msg;
 
 	file->map = H5FD_safe_vfm_truncate(file->map, size);
 
-	msg.m_trunk.type = H5FD_SAFE_MSG_TRUNCATE;
-	msg.m_trunk.size = 0;
-	msg.m_trunk.truncate_to = (int64_t)size;
 
-	return (herr_t)HDwrite(file->log_fd, &msg, sizeof(H5FD_safe_log_msg_t));
+	return 0;
+//	msg.m_trunk.type = H5FD_SAFE_MSG_TRUNCATE;
+//	msg.m_trunk.size = 0;
+//	msg.m_trunk.truncate_to = (int64_t)size;
+//
+//	return (herr_t)HDwrite(file->log_fd, &msg, sizeof(H5FD_safe_log_msg_t));
 
 }
 
@@ -1559,12 +1629,15 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     h5_stat_t       sb;
     H5FD_t          *ret_value;             /* Return value             */
 
-    int log_fd;
-    char log_name[H5FD_MAX_FILENAME_LEN];
+	H5FD_safe_virtual_file_map_t * map0 = NULL;
+	int64_t size0;
+	H5FD_safe_virtual_file_map_t * map1 = NULL;
+	int64_t size1;
+	uint64_t fsize;
 
     FUNC_ENTER_NOAPI_NOINIT
 
-    printf("H5FD_safe_open(%s)\n", name);
+    printf("--- H5FD_safe_open(%s)\n", name);
 
     /* Sanity check on file offsets */
     HDcompile_assert(sizeof(HDoff_t) >= sizeof(size_t));
@@ -1586,137 +1659,11 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     if(H5F_ACC_EXCL & flags)
         o_flags |= O_EXCL;
 
-	if(H5F_ACC_RDWR & flags) {
-
-		HDsnprintf(log_name, H5FD_MAX_FILENAME_LEN, "%s.do_not_delete.journal", name);
-
-		if(HDaccess(log_name, F_OK)) {
-			printf("Replay log\n");
-			if(H5FD_safe_replay_log(name, log_name) < 0) {
-				printf("Replay is dropped\n");
-			}
-		}
-
-	} else {
-		/* read only */
-		log_fd = -1;
-	}
-
     /* Open the file */
     if((fd = HDopen(name, o_flags, 0666)) < 0) {
         int myerrno = errno;
         HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to open file: name = '%s', errno = %d, error message = '%s', flags = %x, o_flags = %x", name, myerrno, HDstrerror(myerrno), flags, (unsigned)o_flags);
     } /* end if */
-
-    if(H5F_ACC_CREAT & flags) {
-    	/** create the log file **/
-    	H5FD_safe_file_header_t hdr;
-
-    	hdr.signature = 0x0a1a0a0d46444890; /* temporary signature \212 H D F \r \n \032 \n */
-    	hdr.file_id = rand();
-    	hdr.version = 0;
-    	memset(&hdr.log0, 0, sizeof(H5FD_safe_log_header_t));
-    	memset(&hdr.log1, 0, sizeof(H5FD_safe_log_header_t));
-
-    	ssize_t w = HDwrite(fd, sizeof(H5FD_safe_file_header_t), &hdr);
-    	if(w != (int)sizeof(H5FD_safe_file_header_t))
-    		HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to create file: name = '%s'", name);
-
-    	file->free = NULL;
-    	file->used = NULL;
-    	file->prot = NULL;
-
-    	/* set protected data */
-    	file->prot = H5FD_safe_alloc_list_add(file->prot, H5FD_safe_alloc_list_new_node(0, sizeof(H5FD_safe_file_header_t)));
-
-    	/* set free space */
-    	file->free = H5FD_safe_negative_mask(file->prot);
-
-    	/** create log **/
-    	file->log_handler.current_file_offset = H5FD_safe_alloc(file, 8192);
-    	file->log_handler.free_log_size = 8192;
-
-    	hdr.log0.check_sum = 0;
-    	hdr.log0.file_map_offset = 0;
-    	hdr.log0.log_begin_offset = file->log_handler.current_file_offset;
-    	hdr.log0.magic_id = rand();
-    	hdr.log0.old_magic_id = 0;
-
-    	file->log_id = hdr.log0.magic_id;
-    	file->file_id = hdr.file_id;
-
-    } else {
-    	H5FD_safe_file_header_t hdr;
-    	int64_t ref_checksum;
-    	int64_t tmp_checksum;
-    	int valid_log0 = -1;
-    	int valid_log1 = -1;
-
-    	/* TODO: read file header and logs */
-
-    	HDlseek(fd, 0, SEEK_SET);
-    	HDread(fd, &hdr, sizeof(H5FD_safe_file_header_t));
-
-    	if(hdr.signature != 0x0a1a0a0d46444890) {
-    		/* TODO: proper return */
-    		return -1;
-    	}
-
-    	do {
-    		/** check first log **/
-			ref_checksum = hdr.log0.check_sum;
-			hdr.log0.check_sum = 0;
-			tmp_checksum = H5_checksum_fletcher32(&(hdr.log0),
-				sizeof(H5FD_safe_log_header_t));
-			if (tmp_checksum != ref_checksum)
-				break;
-
-			H5FD_safe_virtual_file_map_t * map = NULL;
-			if(H5FD_safe_vfm_unserialize(file, hdr.log0.file_map_offset, &map) < 0)
-				break;
-			if(H5FD_safe_check_log(file->fd, file->file_id, hdr.log0.magic_id, hdr.log0.log_begin_offset) < 0)
-				break;
-
-			valid_log0 = 0;
-
-		} while (0);
-
-
-    	do {
-    		/** check first log **/
-			ref_checksum = hdr.log1.check_sum;
-			hdr.log1.check_sum = 0;
-			tmp_checksum = H5_checksum_fletcher32(&(hdr.log1),
-				sizeof(H5FD_safe_log_header_t));
-			if (tmp_checksum != ref_checksum)
-				break;
-
-			H5FD_safe_virtual_file_map_t * map = NULL;
-			if(H5FD_safe_vfm_unserialize(file, hdr.log1.file_map_offset, &map) < 0)
-				break;
-			if(H5FD_safe_check_log(file->fd, file->file_id, hdr.log1.magic_id, hdr.log1.log_begin_offset) < 0)
-				break;
-			valid_log1 = 0;
-		} while (0);
-
-    	if(valid_log0 < 0 && valid_log1 < 0) {
-    		printf("very bad news!!! you file is currupted.\n");
-    	} else if (valid_log0 == 0 && valid_log1) {
-    		printf("found 2 valid log, keep newer\n");
-
-    		if(hdr.log0.old_magic_id == hdr.log1.magic_id && !(hdr.log0.old_magic_id == hdr.log1.magic_id)) {
-    			/** keep log0 **/
-    		} else if(hdr.log1.old_magic_id == hdr.log0.magic_id && !(hdr.log0.old_magic_id == hdr.log1.magic_id)) {
-    			/** keep log1 **/
-    		} else {
-    			printf("inconsistency found in log, select the bigger hdf5\n");
-    			/** TODO: compute file size for both, keep largest or random select one **/
-    		}
-
-    	}
-
-
-    }
 
 
 
@@ -1729,25 +1676,136 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
 
     printf("Create file handler %p\n", file);
 
-	if(H5F_ACC_RDWR & flags) {
+    file->fd = fd;
 
-		printf("Clear log\n");
+    if(H5F_ACC_CREAT & flags) {
+    	/** create the log file **/
+    	H5FD_safe_file_header_t hdr;
+    	ssize_t w;
 
-		/* the journal exist and is readable and writable */
-		if((log_fd = HDopen(log_name, O_RDWR | O_TRUNC | O_CREAT, 0666)) < 0) {
-		   int myerrno = errno;
-		   HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to open file: name = '%s', errno = %d, error message = '%s', flags = %x, o_flags = %x", log_name, myerrno, HDstrerror(myerrno), flags, (unsigned)o_flags);
-		}
+    	memset(&hdr, 0, sizeof(H5FD_safe_file_header_t));
 
-	} else {
-		/* read only */
-		log_fd = -1;
-	}
+    	hdr.signature = 0x0a1a0a0d46444890; /* temporary signature \212 H D F \r \n \032 \n */
+    	hdr.file_id = (uint64_t)rand();
+    	hdr.version = 0;
+
+    	HDftruncate(fd, 0);
+    	HDlseek(fd, 0, SEEK_SET);
+
+    	file->map = NULL;
+    	file->free = NULL;
+    	file->used = NULL;
+    	file->prot = NULL;
+
+    	/* set protected data */
+    	file->prot = H5FD_safe_alloc_list_add(file->prot, H5FD_safe_alloc_list_new_node(0, sizeof(H5FD_safe_file_header_t)));
+
+    	/* set free space */
+    	file->free = H5FD_safe_negative_mask(file->prot);
+
+    	hdr.log0.check_sum = 0;
+    	hdr.log0.file_map_offset = 0;
+    	//hdr.log0.log_begin_offset = file->log_handler.current_file_offset;
+    	hdr.log0.magic_id = (uint64_t)rand();
+    	hdr.log0.old_magic_id = 0;
+
+    	file->file_id = hdr.file_id;
+
+    	w = HDwrite(fd, &hdr, sizeof(H5FD_safe_file_header_t));
+    	if(w != (ssize_t)sizeof(H5FD_safe_file_header_t))
+    		HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to create file: name = '%s'", name);
+
+    } else {
+    	H5FD_safe_file_header_t hdr;
+    	int valid_log0 = -1;
+    	int valid_log1 = -1;
+    	ssize_t w;
+
+    	/* TODO: read file header and logs */
+
+    	HDlseek(fd, 0, SEEK_SET);
+    	w = HDread(fd, &hdr, sizeof(H5FD_safe_file_header_t));
+    	if(w != (ssize_t)sizeof(H5FD_safe_file_header_t))
+    		HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to read file: name = '%s'", name);
+
+    	if(hdr.signature != 0x0a1a0a0d46444890) {
+    		HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "invalid file signature: name = '%s', signature = %016x", name, hdr.signature);
+    	} else {
+    		printf("File signature is valid\n");
+    	}
+
+    	if(H5FD_safe_load_log(file, &hdr.log0, &map0, &size0) < 0) {
+    		valid_log0 = -1;
+    	} else {
+    		valid_log0 = 0;
+    	}
+
+    	if(H5FD_safe_load_log(file, &hdr.log1, &map1, &size1) < 0) {
+    		valid_log1 = -1;
+    	} else {
+    		valid_log1 = 0;
+    	}
+
+    	if(valid_log0 < 0 && valid_log1 < 0) {
+    		HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "very bad news!!! you file is corrupted.");
+    	} else if (valid_log0 == 0 && valid_log1 == 0) {
+    		printf("found 2 valid log, keep newer\n");
+
+    		if(hdr.log0.old_magic_id == hdr.log1.magic_id && !(hdr.log0.old_magic_id == hdr.log1.magic_id)) {
+    			printf("selecting log 0\n");
+    			/** keep log0 **/
+    	    	file->file_id = hdr.file_id;
+    			file->selected_log = 0;
+
+    			H5FD_safe_log_select(file, &hdr.log0, map0, size0);
+
+    		} else if(hdr.log1.old_magic_id == hdr.log0.magic_id && !(hdr.log0.old_magic_id == hdr.log1.magic_id)) {
+    			printf("selecting log 1\n");
+    			/** keep log1 **/
+    	    	file->file_id = hdr.file_id;
+    			file->selected_log = 1;
+    			H5FD_safe_log_select(file, &hdr.log1, map1, size1);
+    		} else {
+    			/** TODO: compute file size for both, keep largest or random select one **/
+        		if(H5FD_safe_vfm_file_size(map0) > H5FD_safe_vfm_file_size(map1)) {
+        			printf("selecting log 0\n");
+        			/** keep log0 **/
+        	    	file->file_id = hdr.file_id;
+        			file->selected_log = 0;
+
+        			H5FD_safe_log_select(file, &hdr.log0, map0, size0);
+        		} else {
+        			printf("selecting log 1\n");
+        			/** keep log1 **/
+        	    	file->file_id = hdr.file_id;
+        			file->selected_log = 1;
+        			H5FD_safe_log_select(file, &hdr.log1, map1, size1);
+        		}
+    		}
+
+    	} else if (valid_log0 == 0 && valid_log1 < 0) {
+			printf("selecting log 0\n");
+			/** keep log0 **/
+	    	file->file_id = hdr.file_id;
+			file->selected_log = 0;
+
+			H5FD_safe_log_select(file, &hdr.log0, map0, size0);
+    	} else if (valid_log0 < 0 && valid_log1 == 0) {
+			printf("selecting log 1\n");
+			/** keep log1 **/
+	    	file->file_id = hdr.file_id;
+			file->selected_log = 1;
+			H5FD_safe_log_select(file, &hdr.log1, map1, size1);
+    	}
+
+
+    }
 
     file->fd = fd;
-	file->log_fd = log_fd;
 
-    H5_ASSIGN_OVERFLOW(file->eof, sb.st_size, h5_stat_size_t, haddr_t);
+    /** get virtual file size **/
+    fsize = H5FD_safe_vfm_file_size(file->map);
+    H5_ASSIGN_OVERFLOW(file->eof, fsize, h5_stat_size_t, haddr_t);
     file->pos = HADDR_UNDEF;
     file->op = OP_UNKNOWN;
 #ifdef H5_HAVE_WIN32_API
@@ -1775,12 +1833,6 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     /* Retain a copy of the name used to open the file, for possible error reporting */
     HDstrncpy(file->filename, name, sizeof(file->filename));
     file->filename[sizeof(file->filename) - 1] = '\0';
-
-	HDstrncpy(file->log_filename, log_name, sizeof(file->log_filename));
-	file->log_filename[sizeof(file->log_filename) - 1] = '\0';
-
-	/** init map **/
-	file->map = H5FD_safe_vfm_new(sb.st_size);
 
     /* Check for non-default FAPL */
     if(H5P_FILE_ACCESS_DEFAULT != fapl_id) {
@@ -1833,7 +1885,15 @@ H5FD_safe_close(H5FD_t *_file)
 {
     H5FD_safe_t *file = (H5FD_safe_t *)_file;
     herr_t      ret_value = SUCCEED;                /* Return value */
-    H5FD_safe_log_msg_t hdr;
+    //H5FD_safe_log_msg_t hdr;
+
+    H5FD_safe_file_header_t hdr;
+    H5FD_safe_log_header_t * log;
+    H5FD_safe_log_header_t * log_old;
+    char * map;
+    int64_t size;
+    int64_t offset;
+    uint64_t count;
 
     FUNC_ENTER_NOAPI_NOINIT
 
@@ -1842,28 +1902,67 @@ H5FD_safe_close(H5FD_t *_file)
 
     printf("H5FD_safe_close(%p, %s)\n", file, file->filename);
 
-    hdr.type = H5FD_SAFE_MSG_CLOSE_FILE;
-    hdr.m_close.size = 0;
-
-    /** ensure log are closed and written on disk **/
-    if(HDwrite(file->log_fd, &hdr, sizeof(H5FD_safe_log_msg_t)) < 0) {
-    	HSYS_GOTO_ERROR(H5E_IO, H5E_CANTCLOSEFILE, FAIL, "unable to write log file")
+    /* write log on unprotected one */
+    if(file->selected_log == 0) {
+    	log = &hdr.log1;
+    	log_old = &hdr.log0;
+    	printf("write log1\n");
+    } else {
+    	log = &hdr.log0;
+    	log_old = &hdr.log1;
+    	printf("write log0\n");
     }
-    fsync(file->log_fd);
-    close(file->log_fd);
 
-    /** replay log to write on file **/
-	if(H5FD_safe_replay_log(file->filename, file->log_filename) < 0) {
-		printf("FAIL to read log\n");
-	} else {
-	    HDunlink(file->log_filename);
-	}
+    HDlseek(file->fd, 0, SEEK_SET);
+    HDread(file->fd, &hdr, sizeof(H5FD_safe_file_header_t));
+
+    log->magic_id = (uint64_t)rand();
+    log->old_magic_id = log_old->magic_id;
+    log->check_sum = 0;
+
+    if(log->magic_id == log->old_magic_id)
+    	log->magic_id += 1;
+
+
+    H5FD_safe_vfm_print(file->map);
+    H5FD_safe_vfm_serialize(file->map, hdr.file_id, log->magic_id, &map, &count, &size);
+    log->file_map_fragment_count = count;
+
+    offset = H5FD_safe_alloc(file, size);
+    log->file_map_offset = (uint64_t)offset;
+    HDlseek(file->fd, offset, SEEK_SET);
+    HDwrite(file->fd, map, size);
+    fsync(file->fd);
+    log->check_sum = H5_checksum_fletcher32(log, sizeof(H5FD_safe_log_header_t));
+    HDlseek(file->fd, 0, SEEK_SET);
+    HDwrite(file->fd, &hdr, sizeof(H5FD_safe_file_header_t));
+    fsync(file->fd);
+
+
+//    printf("H5FD_safe_close(%p, %s)\n", file, file->filename);
+//
+//    hdr.type = H5FD_SAFE_MSG_CLOSE_FILE;
+//    hdr.m_close.size = 0;
+//
+//    /** ensure log are closed and written on disk **/
+//    if(HDwrite(file->log_fd, &hdr, sizeof(H5FD_safe_log_msg_t)) < 0) {
+//    	HSYS_GOTO_ERROR(H5E_IO, H5E_CANTCLOSEFILE, FAIL, "unable to write log file")
+//    }
+//    fsync(file->fd);
+
+//    /** replay log to write on file **/
+//	if(H5FD_safe_replay_log(file->filename, file->log_filename) < 0) {
+//		printf("FAIL to read log\n");
+//	} else {
+//	    HDunlink(file->log_filename);
+//	}
 
     /* Close the underlying file */
     if(HDclose(file->fd) < 0)
         HSYS_GOTO_ERROR(H5E_IO, H5E_CANTCLOSEFILE, FAIL, "unable to close file")
 
     /** remove temporary file **/
+    printf("--- H5FD_safe_close(%p, %s)\n", file, file->filename);
 
 
     /* Release the file info */
@@ -2300,7 +2399,7 @@ H5FD_safe_truncate(H5FD_t *_file, hid_t UNUSED dxpl_id, hbool_t UNUSED closing)
 
     HDassert(file);
 
-    printf("truncate\n");
+    printf("H5FD_safe_truncate(%ld)\n", file->eoa);
 
     /* Extend the file to make sure it's large enough */
     if(!H5F_addr_eq(file->eoa, file->eof)) {

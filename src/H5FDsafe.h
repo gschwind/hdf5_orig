@@ -24,7 +24,7 @@
 
 #include "H5Ipublic.h"
 
-#define H5FD_SID	(H5FD_safe_init())
+#define H5FD_SAFE	(H5FD_safe_init())
 
 #ifdef __cplusplus
 extern "C" {
