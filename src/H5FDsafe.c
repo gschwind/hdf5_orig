@@ -170,15 +170,14 @@ H5FD_safe_alloc_list_remove(H5FD_safe_alloc_list_t * ths, H5FD_safe_alloc_list_t
 
 	cur = &ths;
 
-	while ((*cur) != NULL) {
-		if ((*cur) == node) {
-			break;
-		}
+	while ((*cur) != NULL && (*cur) != node) {
 		cur = &((*cur)->next);
 	}
 
 	if(*cur != NULL) {
 		*cur = (*cur)->next;
+	} else {
+		printf("WARNING: NODE NOT FOUND!\n");
 	}
 
 	return ths;
@@ -587,7 +586,7 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 		return 0;
 
 	if(cur->size == size) {
-		H5FD_safe_alloc_list_remove(file->free, cur);
+		file->free = H5FD_safe_alloc_list_remove(file->free, cur);
 		file->used = H5FD_safe_alloc_list_add(file->used, cur);
 
 		//H5FD_safe_alloc_list_print(file->free, "After free");
@@ -615,20 +614,22 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 static void
 H5FD_safe_free(H5FD_safe_t * file, int64_t offset, int64_t size) {
 	H5FD_safe_alloc_list_t * cur;
-	return; /** never free **/
 	printf("H5FD_safe_free(%ld,%ld)\n", offset, size);
-	H5FD_safe_alloc_list_print(file->free, "Before free");
-	H5FD_safe_alloc_list_print(file->used, "Before used");
+	//H5FD_safe_alloc_list_print(file->free, "Before free");
+	//H5FD_safe_alloc_list_print(file->used, "Before used");
 
 
 	cur = file->used;
 	while(cur != NULL) {
-		int64_t min = MIN(offset, cur->offset);
-		int64_t max = MAX(offset + size, cur->offset + cur->size);
+		int64_t min = MAX(offset, cur->offset);
+		int64_t max = MIN(offset + size, cur->offset + cur->size);
 
-		/* if current used overlaps freeed data */
+		/* if current used overlaps freed data */
 		if(min < max) {
 			H5FD_safe_alloc_list_t * node;
+
+			printf("found used overlaps free [%ld,%ld], [%ld,%ld], [%ld,%ld]\n",
+					offset, offset + size, cur->offset, cur->offset+ cur->size, min, max);
 
 			node = H5FD_safe_alloc_list_new_node(
 						min, max - min);
@@ -660,8 +661,8 @@ H5FD_safe_free(H5FD_safe_t * file, int64_t offset, int64_t size) {
 		}
 	}
 
-	H5FD_safe_alloc_list_print(file->free, "After free");
-	H5FD_safe_alloc_list_print(file->used, "After used");
+	//H5FD_safe_alloc_list_print(file->free, "After free");
+	//H5FD_safe_alloc_list_print(file->used, "After used");
 
 }
 
