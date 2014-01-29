@@ -110,8 +110,12 @@ H5FD_safe_alloc_list_cleanup(H5FD_safe_alloc_list_t * ths) {
 		H5FD_safe_alloc_list_t * j = i->next;
 		while(j != NULL) {
 			if(i->offset + i->size >= j->offset) {
+
+				printf("merge [%ld,%ld] with [%ld,%ld]\n", i->offset, i->offset + i->size, j->offset, j->offset + j->size);
+
 				i->size = j->offset + j->size - i->offset;
 				i->next = j->next;
+				printf("INTO: [%ld,%ld]\n", i->offset, i->offset + i->size);
 				free(j);
 				j = i->next;
 			} else {
@@ -568,8 +572,8 @@ H5FD_safe_write_log_msg(H5FD_safe_t * file, H5FD_safe_log_msg_t * ths) {
 static int64_t
 H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 	printf("H5FD_safe_alloc(%ld)\n", size);
-	H5FD_safe_alloc_list_print(file->free, "Before free");
-	H5FD_safe_alloc_list_print(file->used, "Before used");
+	//H5FD_safe_alloc_list_print(file->free, "Before free");
+	//H5FD_safe_alloc_list_print(file->used, "Before used");
 
 
 	H5FD_safe_alloc_list_t * cur = file->free;
@@ -586,8 +590,8 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 		H5FD_safe_alloc_list_remove(file->free, cur);
 		file->used = H5FD_safe_alloc_list_add(file->used, cur);
 
-		H5FD_safe_alloc_list_print(file->free, "After free");
-		H5FD_safe_alloc_list_print(file->used, "After used");
+		//H5FD_safe_alloc_list_print(file->free, "After free");
+		//H5FD_safe_alloc_list_print(file->used, "After used");
 
 
 		return cur->offset;
@@ -599,8 +603,8 @@ H5FD_safe_alloc(H5FD_safe_t * file, int64_t size) {
 		x = H5FD_safe_alloc_list_new_node(offset, size);
 		file->used = H5FD_safe_alloc_list_add(file->used, x);
 
-		H5FD_safe_alloc_list_print(file->free, "After free");
-		H5FD_safe_alloc_list_print(file->used, "After used");
+		//H5FD_safe_alloc_list_print(file->free, "After free");
+		//H5FD_safe_alloc_list_print(file->used, "After used");
 
 
 		return  offset;
@@ -617,7 +621,7 @@ H5FD_safe_free(H5FD_safe_t * file, int64_t offset, int64_t size) {
 	H5FD_safe_alloc_list_print(file->used, "Before used");
 
 
-	cur == file->used;
+	cur = file->used;
 	while(cur != NULL) {
 		int64_t min = MIN(offset, cur->offset);
 		int64_t max = MAX(offset + size, cur->offset + cur->size);
@@ -675,7 +679,7 @@ H5FD_safe_vfm_extract(H5FD_safe_vfm_t * ths, int64_t offset, int64_t size) {
 		if(x_end - x_start > 0) {
 			/* create new node */
 			H5FD_safe_vfm_t * x = (H5FD_safe_vfm_t *) malloc(sizeof(H5FD_safe_vfm_t));
-			if (x->roffset > 0) {
+			if (cur_src->roffset > 0) {
 				x->roffset = cur_src->roffset + x_start - cur_src->voffset;
 			} else {
 				x->roffset = -1;
@@ -710,16 +714,31 @@ H5FD_safe_vfm_cleanup(H5FD_safe_vfm_t * ths) {
 	while(i != NULL) {
 		H5FD_safe_vfm_t * j = i->next;
 		while(j != NULL) {
-			if((i->voffset + i->size) == j->voffset && (i->roffset + i->size == j->roffset)) {
-				i->size = j->voffset + j->size - i->voffset;
-				i->next = j->next;
-				if(j->next != NULL)
-					j->next->prev = i;
+			if (i->roffset > 0 && j->roffset > 0) {
+				if ((i->voffset + i->size) == j->voffset
+						&& (i->roffset + i->size == j->roffset)) {
+					i->size = j->voffset + j->size - i->voffset;
+					i->next = j->next;
+					if (j->next != NULL)
+						j->next->prev = i;
 
-				free(j);
-				j = i->next;
-			} else {
-				j = j->next;
+					free(j);
+					j = i->next;
+				} else {
+					j = j->next;
+				}
+			} else if(i->roffset < 0 && j->roffset < 0) {
+				if ((i->voffset + i->size) == j->voffset) {
+					i->size = j->voffset + j->size - i->voffset;
+					i->next = j->next;
+					if (j->next != NULL)
+						j->next->prev = i;
+
+					free(j);
+					j = i->next;
+				} else {
+					j = j->next;
+				}
 			}
 		}
 		i = i->next;
@@ -773,7 +792,7 @@ H5FD_safe_vfm_new(int64_t size) {
 	ret_value->next = NULL;
 	ret_value->prev = NULL;
 
-	H5FD_safe_vfm_print(ret_value);
+	//H5FD_safe_vfm_print(ret_value);
 
 	return ret_value;
 }
@@ -1182,7 +1201,7 @@ static ssize_t H5FD_safe_virtual_write(H5FD_safe_t * file, void const * buf, int
 
 	//HDassert(file->log_fd != -1);
 
-	H5FD_safe_vfm_print(file->map);
+	//H5FD_safe_vfm_print(file->map);
 
 	/** allocate file area **/
 	raddr = H5FD_safe_alloc(file, (int64_t)size);
@@ -1320,7 +1339,7 @@ H5FD_safe_vfm_serialize(H5FD_safe_vfm_t * ths, uint64_t file_id, uint64_t log_id
 	uint64_t node_count = 0;
 
 	printf("H5FD_safe_vfm_serialize(%lu,%lu)\n", file_id, log_id);
-	H5FD_safe_vfm_print(ths);
+	//H5FD_safe_vfm_print(ths);
 
 	if(data == NULL || size == NULL)
 		return;
@@ -1393,8 +1412,8 @@ H5FD_safe_vfm_unserialize(int fd, int64_t offset, uint64_t count, H5FD_safe_virt
 
 	free(nodes);
 
-	printf("Unserialized map:\n");
-	H5FD_safe_vfm_print(*ths);
+	//printf("Unserialized map:\n");
+	//H5FD_safe_vfm_print(*ths);
 
 	return 0;
 
@@ -1924,7 +1943,7 @@ H5FD_safe_close(H5FD_t *_file)
     	log->magic_id += 1;
 
 
-    H5FD_safe_vfm_print(file->map);
+    //H5FD_safe_vfm_print(file->map);
     H5FD_safe_vfm_serialize(file->map, hdr.file_id, log->magic_id, &map, &count, &size);
     log->file_map_fragment_count = count;
 
