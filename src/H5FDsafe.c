@@ -280,6 +280,7 @@ typedef struct H5FD_safe_t {
     char            filename[H5FD_MAX_FILENAME_LEN];    /* Copy of file name from open operation */
 
     uint64_t file_id; /* the file id (a random one generated at file creation */
+    uint64_t old_real_file_size;
 
     H5FD_safe_vfm_t * map;   /* map the virtual address space with the real file space */
 
@@ -1421,16 +1422,28 @@ H5FD_safe_vfm_unserialize(int fd, int64_t offset, uint64_t count, H5FD_safe_virt
 }
 
 static uint64_t
-H5FD_safe_vfm_file_size(H5FD_safe_vfm_t * ths) {
+H5FD_safe_vfm_file_size(H5FD_safe_vfm_t const * ths) {
 	H5FD_safe_vfm_t * cur = ths;
 	if (cur != NULL) {
 		while (cur->next != NULL) {
 			cur = cur->next;
 		}
-		return cur->voffset + cur->size;
+		return (uint64_t)(cur->voffset + cur->size);
 	} else {
 		return 0;
 	}
+}
+
+static uint64_t
+H5FD_safe_vfm_file_real_size(H5FD_safe_vfm_t const * ths) {
+	uint64_t max = 0;
+	while(ths != NULL) {
+		if(max < (uint64_t)(ths->roffset + ths->size)) {
+			max = (uint64_t)(ths->roffset + ths->size);
+		}
+		ths = ths->next;
+	}
+	return max;
 }
 
 static herr_t
@@ -1822,6 +1835,7 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     }
 
     file->fd = fd;
+    file->old_real_file_size = H5FD_safe_vfm_file_real_size(file->map);
 
     /** get virtual file size **/
     fsize = H5FD_safe_vfm_file_size(file->map);
@@ -1914,6 +1928,7 @@ H5FD_safe_close(H5FD_t *_file)
     int64_t size;
     int64_t offset;
     uint64_t count;
+    uint64_t current_real_size;
 
     FUNC_ENTER_NOAPI_NOINIT
 
@@ -1952,6 +1967,22 @@ H5FD_safe_close(H5FD_t *_file)
     log->file_map_offset = (uint64_t)offset;
     HDlseek(file->fd, offset, SEEK_SET);
     HDwrite(file->fd, map, size);
+
+    /* compute the current size */
+    current_real_size = H5FD_safe_vfm_file_real_size(file->map);
+    if(current_real_size < sizeof(H5FD_safe_file_header_t)) {
+    	current_real_size = sizeof(H5FD_safe_file_header_t);
+    }
+
+    if(current_real_size < offset+size) {
+    	current_real_size = offset+size;
+    }
+
+    if(current_real_size < (log_old->file_map_offset + (sizeof(H5FD_safe_vfm_serialize_node_t) * log_old->file_map_fragment_count + sizeof(uint64_t)))) {
+    	current_real_size = (log_old->file_map_offset + (sizeof(H5FD_safe_vfm_serialize_node_t) * log_old->file_map_fragment_count + sizeof(uint64_t)));
+    }
+
+    HDftruncate(file->fd, current_real_size);
     fsync(file->fd);
     log->check_sum = H5_checksum_fletcher32(log, sizeof(H5FD_safe_log_header_t));
     HDlseek(file->fd, 0, SEEK_SET);
