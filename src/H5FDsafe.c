@@ -710,9 +710,9 @@ H5FD_safe_vfm_extract(H5FD_safe_vfm_t * ths, int64_t offset, int64_t size) {
 
 static H5FD_safe_vfm_t *
 H5FD_safe_vfm_cleanup(H5FD_safe_vfm_t * ths) {
+	H5FD_safe_vfm_t * i = ths;
 	printf("H5FD_safe_alloc_list_cleanup(%p)\n", ths);
 	H5FD_safe_alloc_list_print(ths, "anonymous");
-	H5FD_safe_vfm_t * i = ths;
 	while(i != NULL) {
 		H5FD_safe_vfm_t * j = i->next;
 		while(j != NULL) {
@@ -741,6 +741,8 @@ H5FD_safe_vfm_cleanup(H5FD_safe_vfm_t * ths) {
 				} else {
 					j = j->next;
 				}
+			} else {
+				j = j->next;
 			}
 		}
 		i = i->next;
@@ -949,6 +951,7 @@ H5FD_safe_vfm_insert(H5FD_safe_t * file, H5FD_safe_vfm_t * ths, int64_t voffset,
 	node_first->roffset = roffset;
 	node_first->size = size;
 
+	ths = H5FD_safe_vfm_cleanup(ths);
 	//H5FD_safe_vfm_print(ths);
 
 	return ths;
