@@ -177,6 +177,15 @@ H5FD_safe_alloc_list_remove(H5FD_safe_alloc_list_t * ths, H5FD_safe_alloc_list_t
 	return ths;
 }
 
+static void
+H5FD_safe_alloc_list_free(H5FD_safe_alloc_list_t * ths) {
+	while(ths != NULL) {
+		H5FD_safe_alloc_list_t * tmp = ths->next;
+		free(ths);
+		ths = tmp;
+	}
+}
+
 static H5FD_safe_alloc_list_t *
 H5FD_safe_negative_mask(H5FD_safe_alloc_list_t * ths) {
 	H5FD_safe_alloc_list_t * res = NULL;
@@ -288,9 +297,6 @@ typedef struct H5FD_safe_t {
 
     int selected_log;              /* which log are currently protected (i.e. the old valid log) */
 
-
-
-#ifndef H5_HAVE_WIN32_API
     /* On most systems the combination of device and i-node number uniquely
      * identify a file.  Note that Cygwin, MinGW and other Windows POSIX
      * environments have the stat function (which fakes inodes)
@@ -303,27 +309,6 @@ typedef struct H5FD_safe_t {
 #else
     ino_t           inode;      /* file i-node number   */
 #endif /* H5_VMS */
-#else
-    /* Files in windows are uniquely identified by the volume serial
-     * number and the file index (both low and high parts).
-     *
-     * There are caveats where these numbers can change, especially
-     * on FAT file systems.  On NTFS, however, a file should keep
-     * those numbers the same until renamed or deleted (though you
-     * can use ReplaceFile() on NTFS to keep the numbers the same
-     * while renaming).
-     *
-     * See the MSDN "BY_HANDLE_FILE_INFORMATION Structure" entry for
-     * more information.
-     *
-     * http://msdn.microsoft.com/en-us/library/aa363788(v=VS.85).aspx
-     */
-    DWORD           nFileIndexLow;
-    DWORD           nFileIndexHigh;
-    DWORD           dwVolumeSerialNumber;
-    
-    HANDLE          hFile;      /* Native windows file handle */
-#endif  /* H5_HAVE_WIN32_API */
 
     /* Information from properties set by 'h5repart' tool
      *
@@ -1584,9 +1569,7 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     H5FD_safe_t     *file       = NULL;     /* sec2 VFD info            */
     int             fd          = -1;       /* File descriptor          */
     int             o_flags;                /* Flags for open() call    */
-#ifdef H5_HAVE_WIN32_API
-    struct _BY_HANDLE_FILE_INFORMATION fileinfo;
-#endif
+
     h5_stat_t       sb;
     H5FD_t          *ret_value;             /* Return value             */
 
@@ -1772,18 +1755,7 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
     H5_ASSIGN_OVERFLOW(file->eof, fsize, h5_stat_size_t, haddr_t);
     file->op = OP_UNKNOWN;
     file->pos = 0;
-#ifdef H5_HAVE_WIN32_API
-    file->hFile = (HANDLE)_get_osfhandle(fd);
-    if(INVALID_HANDLE_VALUE == file->hFile)
-        HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to get Windows file handle")
 
-    if(!GetFileInformationByHandle((HANDLE)file->hFile, &fileinfo))
-        HGOTO_ERROR(H5E_FILE, H5E_CANTOPENFILE, NULL, "unable to get Windows file information")
-
-    file->nFileIndexHigh = fileinfo.nFileIndexHigh;
-    file->nFileIndexLow = fileinfo.nFileIndexLow;
-    file->dwVolumeSerialNumber = fileinfo.dwVolumeSerialNumber;
-#else /* H5_HAVE_WIN32_API */
     file->device = sb.st_dev;
 #ifdef H5_VMS
     file->inode[0] = sb.st_ino[0];
@@ -1792,7 +1764,6 @@ H5FD_safe_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
 #else /* H5_VMS */
     file->inode = sb.st_ino;
 #endif /* H5_VMS */
-#endif /* H5_HAVE_WIN32_API */
 
     /* Retain a copy of the name used to open the file, for possible error reporting */
     HDstrncpy(file->filename, name, sizeof(file->filename));
@@ -1927,7 +1898,14 @@ H5FD_safe_close(H5FD_t *_file)
     if(HDclose(file->fd) < 0)
         HSYS_GOTO_ERROR(H5E_IO, H5E_CANTCLOSEFILE, FAIL, "unable to close file")
 
-    /** remove temporary file **/
+    /** remove temporary file data **/
+    H5FD_safe_alloc_list_free(file->prot);
+    H5FD_safe_alloc_list_free(file->free);
+    H5FD_safe_alloc_list_free(file->used);
+    H5FD_safe_vfm_delete(file->map);
+
+    HDmemset(file, 0, sizeof(H5FD_safe_t));
+
     printf("--- H5FD_safe_close(%p, %s)\n", file, file->filename);
 
 
